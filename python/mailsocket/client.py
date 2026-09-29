@@ -1,0 +1,329 @@
+"""Synchronous HTTP client for the mailsocket v1 REST API.
+
+Pure standard library (``urllib``) — no runtime dependencies.
+"""
+
+from __future__ import annotations
+
+import json
+import time as _time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from .errors import AuthError, MailsocketError, NotFound, RateLimited, WaitTimeout
+
+DEFAULT_BASE_URL = "https://dash.mailsocket.app/api/v1"
+WAIT_TIMEOUT_MAX = 25  # seconds — the server clamps the per-call wait to [1, 25]
+WAIT_SOCKET_BUFFER = 10  # seconds of client-side slack above the server block
+DEFAULT_RETRY_AFTER = 1.0  # seconds, when a 429 carries no Retry-After header
+
+__all__ = ["Client", "Page", "WaitResult"]
+
+
+def _monotonic() -> float:
+    return _time.monotonic()
+
+
+def _sleep(seconds: float) -> None:
+    _time.sleep(seconds)
+
+
+class Page:
+    """A page of results plus its pagination metadata.
+
+    Behaves like a list of ``.data`` while exposing ``.pagination``,
+    ``.next_cursor`` and ``.has_more``.
+    """
+
+    def __init__(self, data: list, pagination: dict | None):
+        self.data = data
+        self.pagination = pagination or {}
+
+    @property
+    def next_cursor(self):
+        return self.pagination.get("next_cursor")
+
+    @property
+    def has_more(self) -> bool:
+        return bool(self.pagination.get("has_more"))
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __iter__(self):
+        return iter(self.data)
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+    def __repr__(self) -> str:
+        return f"Page(data={self.data!r}, pagination={self.pagination!r})"
+
+
+class WaitResult:
+    """The outcome of a ``wait_for_otp`` / ``wait_for_link`` / ``wait`` call."""
+
+    def __init__(self, message: dict):
+        self.message = message
+        self.otp = message.get("otp")
+        self.confidence = message.get("otp_confidence")
+        self.magic_link = message.get("magic_link")
+
+    @property
+    def link(self):
+        """Alias for ``magic_link``."""
+        return self.magic_link
+
+    def __repr__(self) -> str:
+        return (
+            f"WaitResult(otp={self.otp!r}, confidence={self.confidence!r}, "
+            f"magic_link={self.magic_link!r})"
+        )
+
+    def __str__(self) -> str:
+        return self.otp if self.otp is not None else (self.magic_link or "")
+
+
+class Client:
+    """A thin, synchronous client for the mailsocket v1 REST API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        *,
+        request_timeout: float = 30.0,
+    ):
+        if not api_key:
+            raise ValueError("api_key is required")
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._request_timeout = request_timeout
+
+    # -- public API -----------------------------------------------------------
+
+    def create_inbox(self, label: str | None = None) -> dict:
+        body = {} if label is None else {"label": label}
+        payload = self._request("POST", "/inboxes", json_body=body)
+        return payload["data"]
+
+    def list_inboxes(self, limit: int | None = None, cursor: str | None = None) -> Page:
+        payload = self._request("GET", "/inboxes", params=self._page_params(limit, cursor))
+        return Page(payload["data"], payload.get("pagination"))
+
+    def get_inbox(self, inbox_id: str) -> dict:
+        payload = self._request("GET", f"/inboxes/{inbox_id}")
+        return payload["data"]
+
+    def delete_inbox(self, inbox_id: str) -> None:
+        self._request("DELETE", f"/inboxes/{inbox_id}")
+
+    def list_messages(
+        self,
+        inbox_id: str,
+        has_otp: bool | None = None,
+        subject_contains: str | None = None,
+        sender: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Page:
+        params = self._page_params(limit, cursor)
+        if has_otp is not None:
+            params["has_otp"] = "true" if has_otp else "false"
+        if subject_contains:
+            params["subject_contains"] = subject_contains
+        if sender:
+            params["from"] = sender  # the API names this filter ``from``
+        payload = self._request("GET", f"/inboxes/{inbox_id}/messages", params=params)
+        return Page(payload["data"], payload.get("pagination"))
+
+    def get_latest(self, inbox_id: str) -> dict:
+        payload = self._request("GET", f"/inboxes/{inbox_id}/messages/latest")
+        return payload["data"]
+
+    def get_message(self, message_id: str) -> dict:
+        payload = self._request("GET", f"/messages/{message_id}")
+        return payload["data"]
+
+    # -- the moat -------------------------------------------------------------
+
+    def wait_for_otp(
+        self,
+        inbox_id: str,
+        *,
+        timeout: float = 60.0,
+        min_confidence: float = 0.0,
+        since=0,
+    ) -> WaitResult:
+        """Wait for an OTP. Returns a :class:`WaitResult` with ``.otp`` etc."""
+        return self._wait(
+            inbox_id,
+            require="otp",
+            timeout=timeout,
+            min_confidence=min_confidence,
+            since=since,
+        )
+
+    def wait_for_link(self, inbox_id: str, *, timeout: float = 60.0, since=0) -> WaitResult:
+        """Wait for a magic link. Returns a :class:`WaitResult` with ``.link``."""
+        return self._wait(
+            inbox_id, require="link", timeout=timeout, min_confidence=None, since=since
+        )
+
+    def wait(
+        self,
+        inbox_id: str,
+        *,
+        timeout: float = 60.0,
+        min_confidence: float = 0.0,
+        since=0,
+    ) -> WaitResult:
+        """Wait for either an OTP or a magic link."""
+        return self._wait(
+            inbox_id,
+            require="any",
+            timeout=timeout,
+            min_confidence=min_confidence,
+            since=since,
+        )
+
+    # -- internals ------------------------------------------------------------
+
+    def _wait(
+        self,
+        inbox_id: str,
+        *,
+        require: str,
+        timeout: float,
+        min_confidence: float | None,
+        since,
+    ) -> WaitResult:
+        deadline = _monotonic() + float(timeout)
+        while True:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                raise WaitTimeout(
+                    f"No matching message arrived within {timeout:g}s.", code="wait_timeout"
+                )
+            server_timeout = max(1.0, min(float(WAIT_TIMEOUT_MAX), remaining))
+            params = {"timeout": server_timeout, "require": require}
+            if since is not None:
+                params["since"] = since
+            if min_confidence is not None:
+                params["min_confidence"] = min_confidence
+
+            status, headers, body = self._request_http(
+                "GET",
+                f"/inboxes/{inbox_id}/messages/wait",
+                params=params,
+                socket_timeout=server_timeout + WAIT_SOCKET_BUFFER,
+            )
+            payload = self._parse_json(body)
+            if status == 200:
+                return WaitResult(payload["data"])
+            if status == 204:
+                continue
+            if status == 429:
+                retry_after = self._retry_after(headers)
+                sleep_for = retry_after if retry_after is not None else DEFAULT_RETRY_AFTER
+                if _monotonic() + sleep_for > deadline:
+                    raise WaitTimeout(
+                        f"No matching message arrived within {timeout:g}s.", code="wait_timeout"
+                    )
+                _sleep(sleep_for)
+                continue
+            self._raise_for_status(status, headers, payload)
+
+    def _request(self, method: str, path: str, *, params: dict | None = None, json_body=None):
+        status, headers, body = self._request_http(method, path, params=params, json_body=json_body)
+        payload = self._parse_json(body)
+        if 200 <= status < 300:
+            return payload
+        self._raise_for_status(status, headers, payload)
+
+    def _request_http(self, method, path, *, params=None, json_body=None, socket_timeout=None):
+        url = self._base_url + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params, doseq=True)
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "application/json",
+            "User-Agent": "mailsocket-python/0.1.1",
+        }
+        data = None
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        timeout = socket_timeout if socket_timeout is not None else self._request_timeout
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = response.getcode()
+                response_headers = {k.lower(): v for k, v in response.headers.items()}
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            response_headers = {k.lower(): v for k, v in exc.headers.items()}
+            body = exc.read()
+        except urllib.error.URLError as exc:
+            raise MailsocketError(f"Network error: {exc.reason}") from exc
+        return status, response_headers, body
+
+    def _raise_for_status(self, status: int, headers: dict, payload):
+        code = None
+        message = None
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            err = payload["error"]
+            code = err.get("code")
+            message = err.get("message")
+        if status == 401:
+            raise AuthError(
+                message or "Authentication required.",
+                code=code or "authentication_required",
+                status=401,
+            )
+        if status == 404:
+            raise NotFound(
+                message or "Resource not found.", code=code or "not_found", status=404
+            )
+        if status == 429:
+            raise RateLimited(
+                message or "Rate limit exceeded.",
+                code=code or "rate_limited",
+                subcode=code,
+                retry_after=self._retry_after(headers),
+            )
+        raise MailsocketError(message or f"HTTP {status}", code=code, status=status)
+
+    @staticmethod
+    def _parse_json(body: bytes) -> dict:
+        if not body:
+            return {}
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _retry_after(headers: dict) -> float | None:
+        value = headers.get("retry-after")
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        # A negative Retry-After (malformed server/proxy) must never become a
+        # negative sleep; clamp to 0 so the loop re-polls immediately instead.
+        return max(0.0, seconds)
+
+    @staticmethod
+    def _page_params(limit, cursor) -> dict:
+        params = {}
+        if limit is not None:
+            params["limit"] = limit
+        if cursor is not None:
+            params["cursor"] = cursor
+        return params
