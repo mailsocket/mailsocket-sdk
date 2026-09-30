@@ -10,8 +10,8 @@ from mailsocket import AuthError, MailsocketError, NotFound, RateLimited, WaitTi
 from mailsocket_mcp.server import (
     MAX_WAIT_TIMEOUT,
     MISSING_KEY_MESSAGE,
-    _State,
     _build_client_from_env,
+    bind_client,
     server,
 )
 
@@ -106,14 +106,12 @@ class SimplePage:
 
 @pytest.fixture
 def fake_client(monkeypatch):
-    """Wire a FakeClient into the server and ensure a key is present."""
+    """Bind a FakeClient for tool calls (as stdio ``main()`` does) with the key."""
     monkeypatch.setenv("MAILSOCKET_API_KEY", API_KEY)
     monkeypatch.delenv("MAILSOCKET_BASE_URL", raising=False)
-    _State.client = None
     fake = FakeClient()
-    _State.client = fake
-    yield fake
-    _State.client = None
+    with bind_client(fake, API_KEY, max_wait_timeout=MAX_WAIT_TIMEOUT):
+        yield fake
 
 
 def call_tool(name, arguments):
@@ -354,7 +352,6 @@ def test_api_key_never_appears_in_any_error(fake_client):
 
 def test_missing_api_key_raises_clear_startup_error(monkeypatch):
     monkeypatch.delenv("MAILSOCKET_API_KEY", raising=False)
-    _State.client = None
 
     with pytest.raises(RuntimeError) as exc_info:
         _build_client_from_env()
@@ -368,12 +365,14 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """0.1.1 must match everywhere: pyproject, server.json, __version__, user agent."""
+    """Versions match everywhere: MCP 0.2.0 (pyproject, server.json, __version__)
+    and its Python SDK sibling 0.1.2 (pyproject, __version__, user agent)."""
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.1.1"
+    expected = "0.2.0"
+    expected_sdk = "0.1.2"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected
@@ -381,6 +380,8 @@ def test_metadata_consistency_across_files():
     server_json = json.loads((root / "server.json").read_text())
     assert server_json["version"] == expected
     assert server_json["packages"][0]["version"] == expected
+    # The MCP package must require an SDK new enough to have extra_headers.
+    assert f"mailsocket>={expected_sdk}" in " ".join(pyproject["project"]["dependencies"])
 
     assert mailsocket_mcp.__version__ == expected
     assert mailsocket_mcp.server.__version__ == expected
@@ -388,14 +389,14 @@ def test_metadata_consistency_across_files():
     python_pyproject = tomllib.loads(
         (root.parent / "python" / "pyproject.toml").read_text()
     )
-    assert python_pyproject["project"]["version"] == expected
+    assert python_pyproject["project"]["version"] == expected_sdk
 
     from mailsocket import __version__ as python_version
 
-    assert python_version == expected
+    assert python_version == expected_sdk
 
     client_src = (root.parent / "python" / "mailsocket" / "client.py").read_text()
-    assert f"mailsocket-python/{expected}" in client_src
+    assert f"mailsocket-python/{expected_sdk}" in client_src
 
 
 # -- ocr-found HIGH: reformatted-key redaction + broadened exception scrub ----
@@ -407,15 +408,19 @@ def test_safe_redacts_url_encoded_and_prefixed_keys(fake_client):
     from mailsocket_mcp.server import _safe
 
     # literal
-    assert API_KEY not in _safe(f"boom {API_KEY} boom")
+    assert API_KEY not in _safe(f"boom {API_KEY} boom", API_KEY)
     # url-encoded form (e.g. key appearing inside a URL in an error)
     enc = quote(API_KEY, safe="")
-    assert API_KEY not in _safe(f"GET /x?k={enc} failed")
-    assert enc not in _safe(f"GET /x?k={enc} failed")
+    assert API_KEY not in _safe(f"GET /x?k={enc} failed", API_KEY)
+    assert enc not in _safe(f"GET /x?k={enc} failed", API_KEY)
     # a DIFFERENT but ms_live_-shaped token is still scrubbed (defense in depth)
     other = "ms_live_SOMEOTHERSECRET99"
-    assert other not in _safe(f"leaked {other} here")
-    assert "***" in _safe(f"leaked {other} here")
+    assert other not in _safe(f"leaked {other} here", API_KEY)
+    assert "***" in _safe(f"leaked {other} here", API_KEY)
+    # A non-ms_live_-shaped key is only scrubbed when passed explicitly.
+    odd = "weird-key/with+chars"
+    assert odd not in _safe(f"x {odd} y", odd)
+    assert quote(odd, safe="") not in _safe(f"x {quote(odd, safe='')} y", odd)
 
 
 def test_unexpected_exception_is_scrubbed_not_raw_traceback(fake_client):
@@ -429,3 +434,59 @@ def test_unexpected_exception_is_scrubbed_not_raw_traceback(fake_client):
     text = result.content[0].text
     assert API_KEY not in text
     assert "Traceback" not in text
+
+
+# -- refactor: per-call binding, no env fallback, configurable clamp ----------
+
+
+def test_unbound_tool_call_never_falls_back_to_env(monkeypatch):
+    """Outside stdio main() a tool must NOT read MAILSOCKET_API_KEY from env."""
+    monkeypatch.setenv("MAILSOCKET_API_KEY", API_KEY)
+    import mailsocket_mcp.server as srv
+
+    built = []
+    monkeypatch.setattr(srv, "_build_client_from_env", lambda: built.append(1))
+
+    result = call_tool("list_inboxes", {})
+
+    assert result.is_error is True
+    assert "No mailsocket API key" in result.content[0].text
+    assert built == []
+
+
+def test_clamp_ceiling_follows_the_binding():
+    from mailsocket_mcp import REMOTE_MAX_WAIT_TIMEOUT
+
+    fake = FakeClient()
+    fake.wait_otp = FakeWaitResult(otp="1")
+    with bind_client(fake, API_KEY, max_wait_timeout=REMOTE_MAX_WAIT_TIMEOUT):
+        call_tool("wait_for_otp", {"inbox_id": "i", "timeout": 9999})
+    assert fake.wait_otp_calls[0][1] == REMOTE_MAX_WAIT_TIMEOUT == 55.0
+
+
+def test_stdio_main_binds_env_client_once(monkeypatch):
+    import mailsocket_mcp.server as srv
+
+    monkeypatch.setenv("MAILSOCKET_API_KEY", API_KEY)
+    monkeypatch.delenv("MAILSOCKET_BASE_URL", raising=False)
+    seen = {}
+
+    def fake_run(*a, **k):
+        ctx = srv._current()
+        seen["key"] = ctx.api_key
+        seen["ceiling"] = ctx.max_wait_timeout
+
+    monkeypatch.setattr(srv.server, "run", fake_run)
+    srv.main()
+    assert seen == {"key": API_KEY, "ceiling": MAX_WAIT_TIMEOUT}
+    assert srv._current() is None  # binding reset after the server exits
+
+
+def test_stdio_main_missing_key_exits_2(monkeypatch, capsys):
+    import mailsocket_mcp.server as srv
+
+    monkeypatch.delenv("MAILSOCKET_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        srv.main()
+    assert exc_info.value.code == 2
+    assert "MAILSOCKET_API_KEY" in capsys.readouterr().err

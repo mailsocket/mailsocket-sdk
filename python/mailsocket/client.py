@@ -29,6 +29,18 @@ def _sleep(seconds: float) -> None:
     _time.sleep(seconds)
 
 
+def _seg(value) -> str:
+    """Percent-encode an id as ONE path segment (``/``, ``?``, ``#``, ``..`` safe).
+
+    ``quote`` leaves ``.`` alone (unreserved), so a bare ``.``/``..`` segment
+    is additionally encoded as ``%2E`` so no proxy can treat it as traversal.
+    """
+    encoded = urllib.parse.quote(str(value), safe="")
+    if encoded in (".", ".."):
+        encoded = encoded.replace(".", "%2E")
+    return encoded
+
+
 class Page:
     """A page of results plus its pagination metadata.
 
@@ -94,12 +106,32 @@ class Client:
         base_url: str = DEFAULT_BASE_URL,
         *,
         request_timeout: float = 30.0,
+        extra_headers: dict[str, str] | None = None,
+        retry_wait_on_429: bool = True,
     ):
+        """Create a client.
+
+        ``extra_headers`` (optional) are sent on every request, e.g. a fixed
+        ``Host`` when calling the API through an internal address. They can
+        never override ``Authorization``; that header always carries
+        ``api_key``.
+
+        ``retry_wait_on_429`` (default True): the ``wait*`` helpers sleep for
+        ``Retry-After`` and retry on HTTP 429 until their deadline. Pass False
+        to raise :class:`RateLimited` immediately instead (used by the shared
+        remote MCP server so a rate-limited caller doesn't hold a worker slot).
+        """
         if not api_key:
             raise ValueError("api_key is required")
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._request_timeout = request_timeout
+        self._retry_wait_on_429 = retry_wait_on_429
+        self._extra_headers = {
+            str(name): str(value)
+            for name, value in (extra_headers or {}).items()
+            if str(name).lower() != "authorization"
+        }
 
     # -- public API -----------------------------------------------------------
 
@@ -113,11 +145,11 @@ class Client:
         return Page(payload["data"], payload.get("pagination"))
 
     def get_inbox(self, inbox_id: str) -> dict:
-        payload = self._request("GET", f"/inboxes/{inbox_id}")
+        payload = self._request("GET", f"/inboxes/{_seg(inbox_id)}")
         return payload["data"]
 
     def delete_inbox(self, inbox_id: str) -> None:
-        self._request("DELETE", f"/inboxes/{inbox_id}")
+        self._request("DELETE", f"/inboxes/{_seg(inbox_id)}")
 
     def list_messages(
         self,
@@ -135,15 +167,15 @@ class Client:
             params["subject_contains"] = subject_contains
         if sender:
             params["from"] = sender  # the API names this filter ``from``
-        payload = self._request("GET", f"/inboxes/{inbox_id}/messages", params=params)
+        payload = self._request("GET", f"/inboxes/{_seg(inbox_id)}/messages", params=params)
         return Page(payload["data"], payload.get("pagination"))
 
     def get_latest(self, inbox_id: str) -> dict:
-        payload = self._request("GET", f"/inboxes/{inbox_id}/messages/latest")
+        payload = self._request("GET", f"/inboxes/{_seg(inbox_id)}/messages/latest")
         return payload["data"]
 
     def get_message(self, message_id: str) -> dict:
-        payload = self._request("GET", f"/messages/{message_id}")
+        payload = self._request("GET", f"/messages/{_seg(message_id)}")
         return payload["data"]
 
     # -- the moat -------------------------------------------------------------
@@ -215,7 +247,7 @@ class Client:
 
             status, headers, body = self._request_http(
                 "GET",
-                f"/inboxes/{inbox_id}/messages/wait",
+                f"/inboxes/{_seg(inbox_id)}/messages/wait",
                 params=params,
                 socket_timeout=server_timeout + WAIT_SOCKET_BUFFER,
             )
@@ -225,6 +257,8 @@ class Client:
             if status == 204:
                 continue
             if status == 429:
+                if not self._retry_wait_on_429:
+                    self._raise_for_status(status, headers, payload)
                 retry_after = self._retry_after(headers)
                 sleep_for = retry_after if retry_after is not None else DEFAULT_RETRY_AFTER
                 if _monotonic() + sleep_for > deadline:
@@ -247,10 +281,12 @@ class Client:
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",
-            "User-Agent": "mailsocket-python/0.1.1",
+            "User-Agent": "mailsocket-python/0.1.2",
         }
+        headers.update(self._extra_headers)
+        # Set last so nothing in extra_headers can ever replace it.
+        headers["Authorization"] = f"Bearer {self._api_key}"
         data = None
         if json_body is not None:
             data = json.dumps(json_body).encode("utf-8")

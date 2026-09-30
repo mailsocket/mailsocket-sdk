@@ -199,6 +199,91 @@ def test_wait_429_parses_subcode_and_retries(monkeypatch):
     assert len(transport.calls) == 2
 
 
+HOSTILE_IDS = [
+    ("in?x=1", "in%3Fx%3D1"),
+    ("in#frag", "in%23frag"),
+    ("../../admin", "..%2F..%2Fadmin"),
+    ("..", "%2E%2E"),
+    (".", "%2E"),
+    ("a/b", "a%2Fb"),
+    ("sp ce&%", "sp%20ce%26%25"),
+]
+
+
+@pytest.mark.parametrize("raw, encoded", HOSTILE_IDS)
+def test_ids_are_quoted_as_one_path_segment_everywhere(monkeypatch, raw, encoded):
+    """opus P3-2: every id interpolated into a URL path is quote(..., safe="")."""
+    import urllib.parse
+
+    page = {"data": [], "pagination": {}}
+    responses = [
+        (200, {}, {"data": {"id": "x"}}),  # get_inbox
+        (204, {}, None),  # delete_inbox
+        (200, {}, page),  # list_messages
+        (200, {}, {"data": {"id": "x"}}),  # get_latest
+        (200, {}, {"data": {"id": "x"}}),  # get_message
+        (200, {}, {"data": OTP_MESSAGE}),  # wait_for_otp
+        (200, {}, {"data": LINK_MESSAGE}),  # wait_for_link
+        (200, {}, {"data": OTP_MESSAGE}),  # wait
+    ]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.get_inbox(raw)
+    client.delete_inbox(raw)
+    client.list_messages(raw, has_otp=True)
+    client.get_latest(raw)
+    client.get_message(raw)
+    client.wait_for_otp(raw, timeout=5)
+    client.wait_for_link(raw, timeout=5)
+    client.wait(raw, timeout=5)
+
+    expected_paths = [
+        f"/api/v1/inboxes/{encoded}",
+        f"/api/v1/inboxes/{encoded}",
+        f"/api/v1/inboxes/{encoded}/messages",
+        f"/api/v1/inboxes/{encoded}/messages/latest",
+        f"/api/v1/messages/{encoded}",
+        f"/api/v1/inboxes/{encoded}/messages/wait",
+        f"/api/v1/inboxes/{encoded}/messages/wait",
+        f"/api/v1/inboxes/{encoded}/messages/wait",
+    ]
+    assert len(transport.calls) == len(expected_paths)
+    for (_, url), expected in zip(transport.calls, expected_paths):
+        parts = urllib.parse.urlsplit(url)
+        assert parts.netloc == "example.test"
+        assert parts.path == expected, url
+        assert parts.fragment == ""
+        # the id never leaks into the query string
+        assert "x=1" not in parts.query and "frag" not in parts.query
+    # a normal id is unchanged
+    assert mailsocket.client._seg("inbox_abc123") == "inbox_abc123"
+
+
+def test_wait_429_raises_immediately_when_retry_disabled(monkeypatch):
+    """retry_wait_on_429=False (remote MCP): no sleep, one call, RateLimited."""
+    slept = []
+    monkeypatch.setattr(mailsocket.client, "_sleep", lambda s: slept.append(s))
+    responses = [
+        (
+            429,
+            {"Retry-After": "2"},
+            {"error": {"code": "too_many_wait_requests", "message": "Too many", "fields": {}}},
+        ),
+        (200, {}, {"data": OTP_MESSAGE}),
+    ]
+    client, transport = make_client(responses, retry_wait_on_429=False)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    with pytest.raises(RateLimited) as exc_info:
+        client.wait_for_otp("inbox_abc", timeout=60)
+
+    assert exc_info.value.subcode == "too_many_wait_requests"
+    assert exc_info.value.retry_after == 2.0
+    assert len(transport.calls) == 1
+    assert slept == []
+
+
 def test_wait_429_raises_rate_limited_with_subcode_on_non_wait_endpoint(monkeypatch):
     responses = [
         (
@@ -357,13 +442,13 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """0.1.1 must match everywhere: pyproject, __version__, user agent, and MCP sibling."""
+    """0.1.2 must match everywhere: pyproject, __version__, user agent."""
     import re
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.1.1"
+    expected = "0.1.2"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected
@@ -373,3 +458,69 @@ def test_metadata_consistency_across_files():
     match = re.search(r'"mailsocket-python/([^"]+)"', client_src)
     assert match, "User-Agent literal not found in client.py"
     assert match.group(1) == expected
+
+
+# -- extra_headers ------------------------------------------------------------
+
+
+class _HeaderCapture:
+    def __init__(self):
+        self.headers = []
+
+    def __call__(self, request, timeout=None):
+        self.headers.append({k.lower(): v for k, v in request.header_items()})
+
+        class _Resp:
+            headers = {}
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return json.dumps({"data": {"id": "inbox_1"}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        return _Resp()
+
+
+def test_extra_headers_are_sent(monkeypatch):
+    capture = _HeaderCapture()
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+    client = Client(
+        "ms_live_test1234567890",
+        base_url="http://web:8000/api/v1",
+        extra_headers={"Host": "dash.mailsocket.app", "X-Forwarded-Proto": "https"},
+    )
+    client.get_inbox("inbox_1")
+    sent = capture.headers[0]
+    assert sent["host"] == "dash.mailsocket.app"
+    assert sent["x-forwarded-proto"] == "https"
+    assert sent["authorization"] == "Bearer ms_live_test1234567890"
+
+
+@pytest.mark.parametrize("name", ["Authorization", "authorization", "AUTHORIZATION"])
+def test_extra_headers_cannot_override_authorization(monkeypatch, name):
+    capture = _HeaderCapture()
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+    client = Client(
+        "ms_live_test1234567890",
+        base_url="https://example.test/api/v1",
+        extra_headers={name: "Bearer ms_live_ATTACKER_KEY_000"},
+    )
+    client.get_inbox("inbox_1")
+    auths = [v for k, v in capture.headers[0].items() if k == "authorization"]
+    assert auths == ["Bearer ms_live_test1234567890"]
+
+
+def test_no_extra_headers_is_backwards_compatible(monkeypatch):
+    capture = _HeaderCapture()
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+    Client("ms_live_test1234567890", base_url="https://example.test/api/v1").get_inbox("i")
+    sent = capture.headers[0]
+    assert set(sent) >= {"authorization", "accept", "user-agent"}
+    assert "x-forwarded-proto" not in sent
