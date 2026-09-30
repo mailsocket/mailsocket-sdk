@@ -90,5 +90,11 @@ cd python
 python -m pytest -q
 ```
 
-Tests are fully offline — they monkeypatch `urllib.request.urlopen` with a
-scripted responder, so nothing touches the live API.
+Tests make no external or live-API requests. Most monkeypatch
+`urllib.request.urlopen` with a scripted responder, and a few start a real local
+`http.server` on `127.0.0.1` to check actual request behaviour, e.g. that an
+invalid id never reaches the network.
+
+## Changelog
+
+- **0.1.3** — `_seg` now rejects an empty id or a bare `.`/`..` id with a `MailsocketError` (`code="invalid_id"`) before any request is made, matching the TypeScript SDK's contract.

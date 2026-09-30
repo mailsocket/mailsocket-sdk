@@ -25,7 +25,18 @@ result with a confidence score.
 npm install mailsocket-sdk
 ```
 
-Zero runtime dependencies — uses the global `fetch`. Node 18+, ESM. Ships TypeScript types.
+Zero runtime dependencies — uses the global `fetch`. Node 18+. Ships TypeScript types.
+Ships both ESM and CommonJS builds:
+
+```ts
+// ESM / TypeScript
+import { MailsocketClient } from "mailsocket-sdk";
+```
+
+```js
+// CommonJS
+const { MailsocketClient } = require("mailsocket-sdk");
+```
 
 ## API
 
@@ -79,12 +90,34 @@ plus the full `.message`. Semantics:
 - `RateLimited` — HTTP 429, carries `.subcode` (`rate_limited`, `too_many_wait_requests`, `wait_capacity`) and `.retryAfter` (seconds).
 - `WaitTimeout` — no matching message within the overall deadline.
 
+`instanceof` works even if your app ends up with both the ESM and the CommonJS copy
+loaded (e.g. an ESM app using a CJS dependency that also uses the SDK). An error
+thrown by either copy matches the other copy's classes.
+
 ## Develop
 
 ```bash
 npm install
-npm run build     # tsc -> dist/
-npm test          # node:test against the built dist (mock fetch, no network)
+npm run build     # dual build: build:esm + build:cjs (see below)
+npm test          # builds, then node:test against dist + the packed tarball
 ```
 
-Tests are fully offline — they install a scripted `fetch` mock, so nothing touches the live API.
+`npm run build` compiles twice with `tsc`, no bundler:
+
+- `build:esm` — `tsconfig.json` → ESM in `dist/` (`index.js`, `.d.ts`, source maps).
+- `build:cjs` — `tsconfig.cjs.json` → CommonJS in `dist/cjs/`, then
+  `scripts/rename-cjs.mjs` renames `.js`/`.d.ts` to `.cjs`/`.d.cts`, rewrites
+  internal specifiers to match, drops the (unshipped) CJS source maps and their
+  `sourceMappingURL` comments, and writes `dist/cjs/package.json` (`{"type":"commonjs"}`).
+
+`package.json` `exports` routes `import` → `dist/index.js` + `dist/index.d.ts` and
+`require` → `dist/cjs/index.cjs` + `dist/cjs/index.d.cts`.
+
+Tests make no live-API requests: they use a scripted `fetch` mock plus a few
+local `127.0.0.1` HTTP servers. `test/packed.test.mjs` also runs `npm pack`, installs the
+tarball into a temp project, and type-checks node16 ESM (`.mts`) and CJS (`.cts`)
+consumers with `tsc --noEmit`.
+
+## Changelog
+
+- **0.1.3** — added a CommonJS build (`dist/cjs`) alongside ESM, so `require("mailsocket-sdk")` works. See Install above for both usages. `instanceof` checks on the error classes work across the two builds, even when an app loads the package via both `import` and `require()`.

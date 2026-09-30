@@ -151,7 +151,11 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests are fully offline — the SDK client is faked, so nothing touches the live
-API.
+Tests make no external or live-API requests. The SDK client is faked, and the
+remote-transport tests talk to a local fake upstream on `127.0.0.1`.
+
+## Changelog
+
+- **0.2.2** — depends on `mailsocket>=0.1.3` (stricter `_seg` id validation in the underlying Python SDK).
 
 <!-- mcp-name: app.mailsocket/mailsocket-mcp -->

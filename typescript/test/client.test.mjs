@@ -300,13 +300,13 @@ test("network failure / socket abort is wrapped as MailsocketError (ocr HIGH)", 
   );
 });
 
-test("metadata consistency: 0.1.2 matches package.json/package-lock/USER_AGENT", async () => {
+test("metadata consistency: 0.1.3 matches package.json/package-lock/USER_AGENT", async () => {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const path = await import("node:path");
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const expected = "0.1.2";
+  const expected = "0.1.3";
 
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(pkg.version, expected);

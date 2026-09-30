@@ -32,13 +32,19 @@ def _sleep(seconds: float) -> None:
 def _seg(value) -> str:
     """Percent-encode an id as ONE path segment (``/``, ``?``, ``#``, ``..`` safe).
 
-    ``quote`` leaves ``.`` alone (unreserved), so a bare ``.``/``..`` segment
-    is additionally encoded as ``%2E`` so no proxy can treat it as traversal.
+    An empty id and the bare dot segments ``.`` / ``..`` are rejected with a
+    :class:`MailsocketError` before any request is made (same contract as the
+    TypeScript SDK's ``seg``): urllib's request machinery would otherwise let
+    them collapse into a different path than the caller intended. No real id
+    is ever one of these.
     """
-    encoded = urllib.parse.quote(str(value), safe="")
-    if encoded in (".", ".."):
-        encoded = encoded.replace(".", "%2E")
-    return encoded
+    raw = str(value)
+    if raw in ("", ".", ".."):
+        raise MailsocketError(
+            f"Invalid id {raw!r}: ids must be non-empty and not \".\" or \"..\".",
+            code="invalid_id",
+        )
+    return urllib.parse.quote(raw, safe="")
 
 
 class Page:
@@ -282,7 +288,7 @@ class Client:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "mailsocket-python/0.1.2",
+            "User-Agent": "mailsocket-python/0.1.3",
         }
         headers.update(self._extra_headers)
         # Set last so nothing in extra_headers can ever replace it.

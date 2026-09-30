@@ -26,7 +26,7 @@ const WAIT_SOCKET_BUFFER_MS = 10_000;
 /** Default retry delay (ms) when a 429 carries no Retry-After header. */
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 
-const USER_AGENT = "mailsocket-typescript/0.1.2";
+const USER_AGENT = "mailsocket-typescript/0.1.3";
 
 /**
  * Percent-encode a caller-supplied id as ONE path segment (`/`, `?`, `#`,

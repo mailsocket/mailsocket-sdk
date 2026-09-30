@@ -203,8 +203,6 @@ HOSTILE_IDS = [
     ("in?x=1", "in%3Fx%3D1"),
     ("in#frag", "in%23frag"),
     ("../../admin", "..%2F..%2Fadmin"),
-    ("..", "%2E%2E"),
-    (".", "%2E"),
     ("a/b", "a%2Fb"),
     ("sp ce&%", "sp%20ce%26%25"),
 ]
@@ -437,18 +435,88 @@ def test_error_types_are_mailsocket_subclasses():
     assert issubclass(WaitTimeout, MailsocketError)
 
 
+# -- F2: _seg rejects "" / "." / ".." before any request (parity with TS) -----
+
+
+def test_seg_rejects_empty_and_dot_segments():
+    for raw in ("", ".", ".."):
+        with pytest.raises(MailsocketError) as exc_info:
+            mailsocket.client._seg(raw)
+        assert exc_info.value.code == "invalid_id"
+
+
+INVALID_IDS = ["", ".", ".."]
+
+
+@pytest.mark.parametrize("raw", INVALID_IDS)
+def test_invalid_id_rejected_before_any_request_hits_real_server(raw):
+    """Nothing reaches the network: a real local http.server never sees a request."""
+    import http.server
+    import threading
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _record(self):
+            seen.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"data": {"id": "x"}}).encode())
+
+        def do_GET(self):
+            self._record()
+
+        def do_DELETE(self):
+            self._record()
+
+        def do_POST(self):
+            self._record()
+
+        def log_message(self, format, *args):
+            pass  # keep test output clean
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}/api/v1"
+        client = Client("ms_live_test1234567890", base_url=base_url)
+
+        calls = [
+            lambda: client.get_inbox(raw),
+            lambda: client.delete_inbox(raw),
+            lambda: client.list_messages(raw),
+            lambda: client.get_latest(raw),
+            lambda: client.get_message(raw),
+            lambda: client.wait_for_otp(raw, timeout=5),
+            lambda: client.wait_for_link(raw, timeout=5),
+            lambda: client.wait(raw, timeout=5),
+        ]
+        for call in calls:
+            with pytest.raises(MailsocketError) as exc_info:
+                call()
+            assert exc_info.value.code == "invalid_id"
+            assert not isinstance(exc_info.value, WaitTimeout)
+
+        assert seen == []  # nothing ever reached the network
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_version_exported():
     assert hasattr(mailsocket, "__version__")
 
 
 def test_metadata_consistency_across_files():
-    """0.1.2 must match everywhere: pyproject, __version__, user agent."""
+    """0.1.3 must match everywhere: pyproject, __version__, user agent."""
     import re
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.1.2"
+    expected = "0.1.3"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected
