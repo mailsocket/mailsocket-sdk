@@ -13,6 +13,9 @@ import {
 const BASE = "https://example.test/api/v1";
 const API_KEY = "ms_live_test1234567890";
 
+/** The platform fetch, captured before any test installs a scripted mock. */
+const REAL_FETCH = globalThis.fetch;
+
 const OTP_MESSAGE = {
   id: "msg_123",
   inbox_id: "inbox_abc",
@@ -297,13 +300,13 @@ test("network failure / socket abort is wrapped as MailsocketError (ocr HIGH)", 
   );
 });
 
-test("metadata consistency: 0.1.1 matches package.json/package-lock/USER_AGENT", async () => {
+test("metadata consistency: 0.1.2 matches package.json/package-lock/USER_AGENT", async () => {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const path = await import("node:path");
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const expected = "0.1.1";
+  const expected = "0.1.2";
 
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(pkg.version, expected);
@@ -314,4 +317,230 @@ test("metadata consistency: 0.1.1 matches package.json/package-lock/USER_AGENT",
 
   const clientSrc = readFileSync(path.join(root, "src", "client.ts"), "utf8");
   assert.match(clientSrc, new RegExp(`mailsocket-typescript/${expected}`));
+});
+
+// -- F1: caller ids are encoded as ONE path segment (parity with Python _seg) --
+
+/** The request path exactly as the SDK hands it to fetch(). */
+function requestedPath(url) {
+  const prefix = BASE;
+  assert.ok(url.startsWith(prefix), url);
+  return url.slice(prefix.length).split("?")[0];
+}
+
+const HOSTILE_IDS = [
+  ["inbox?x=1", "inbox%3Fx%3D1"],
+  ["inbox#frag", "inbox%23frag"],
+  ["../admin", "..%2Fadmin"],
+  ["a/../../b", "a%2F..%2F..%2Fb"],
+  ["...", "..."],
+  ["in box%2F", "in%20box%252F"],
+];
+
+for (const [id, enc] of HOSTILE_IDS) {
+  test(`path segments are encoded: ${JSON.stringify(id)} -> ${enc}`, async () => {
+    const ok = (data) => ({ status: 200, body: JSON.stringify({ data }) });
+    const page = { status: 200, body: JSON.stringify({ data: [], pagination: { next_cursor: null, has_more: false } }) };
+    const calls = installFetch([
+      ok({ id }), // getInbox
+      { status: 204 }, // deleteInbox
+      page, // listMessages
+      ok(OTP_MESSAGE), // getLatest
+      ok(OTP_MESSAGE), // getMessage
+      ok(OTP_MESSAGE), // waitForOtp
+      ok(LINK_MESSAGE), // waitForLink
+      ok(OTP_MESSAGE), // wait
+    ]);
+    const c = client();
+    await c.getInbox(id);
+    await c.deleteInbox(id);
+    await c.listMessages(id, { hasOtp: true });
+    await c.getLatest(id);
+    await c.getMessage(id);
+    await c.waitForOtp(id);
+    await c.waitForLink(id);
+    await c.wait(id);
+
+    assert.deepEqual(
+      calls.map(({ url }) => requestedPath(url)),
+      [
+        `/inboxes/${enc}`,
+        `/inboxes/${enc}`,
+        `/inboxes/${enc}/messages`,
+        `/inboxes/${enc}/messages/latest`,
+        `/messages/${enc}`,
+        `/inboxes/${enc}/messages/wait`,
+        `/inboxes/${enc}/messages/wait`,
+        `/inboxes/${enc}/messages/wait`,
+      ],
+    );
+    // the id never leaks into the query string or a fragment
+    for (const { url } of calls) {
+      assert.ok(!url.includes("#"), url);
+      const params = new URL(url).searchParams;
+      assert.equal(params.get("x"), null, url);
+    }
+    // wait keeps its own query params intact
+    assert.equal(new URL(calls[5].url).searchParams.get("require"), "otp");
+  });
+}
+
+// -- F1 r2: real transport boundary (node:http server, the platform fetch) --
+
+/**
+ * Start a real local HTTP server that records every raw request line path
+ * (`req.url`, exactly as received on the socket) and answers like the API.
+ */
+async function startRecordingServer() {
+  const http = await import("node:http");
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.url);
+    const path = req.url.split("?")[0];
+    let status = 200;
+    let body;
+    if (req.method === "DELETE") {
+      status = 204;
+    } else if (path.endsWith("/messages")) {
+      body = { data: [], pagination: { next_cursor: null, has_more: false } };
+    } else if (path.startsWith("/api/v1/inboxes/") && !path.includes("/messages")) {
+      body = { data: { id: "x" } };
+    } else {
+      body = { data: OTP_MESSAGE };
+    }
+    res.writeHead(status, body ? { "Content-Type": "application/json" } : {});
+    res.end(body ? JSON.stringify(body) : undefined);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return {
+    seen,
+    baseUrl: `http://127.0.0.1:${port}/api/v1`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+/** Run `fn` with the platform fetch (undoing any scripted mock), then restore. */
+async function withRealFetch(fn) {
+  const previous = globalThis.fetch;
+  globalThis.fetch = REAL_FETCH;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = previous;
+  }
+}
+
+/** Every id-taking method, in a fixed order. */
+async function callEveryIdMethod(c, id) {
+  await c.getInbox(id);
+  await c.deleteInbox(id);
+  await c.listMessages(id);
+  await c.getLatest(id);
+  await c.getMessage(id);
+  // default 60s timeout: the server answers at once; 25s blocks keep the
+  // AbortSignal delay integral (see F1 r2 report for the sub-25s caveat)
+  await c.waitForOtp(id);
+  await c.waitForLink(id);
+  await c.wait(id);
+}
+
+const WIRE_IDS = [
+  ["?", "%3F"],
+  ["#", "%23"],
+  ["../x", "..%2Fx"],
+  ["a/b", "a%2Fb"],
+];
+
+for (const [id, enc] of WIRE_IDS) {
+  test(`real HTTP server: ${JSON.stringify(id)} arrives as ONE encoded segment (${enc})`, async () => {
+    const srv = await startRecordingServer();
+    try {
+      await withRealFetch(() =>
+        callEveryIdMethod(new MailsocketClient(API_KEY, { baseUrl: srv.baseUrl }), id),
+      );
+      assert.deepEqual(
+        srv.seen.map((u) => u.split("?")[0]),
+        [
+          `/api/v1/inboxes/${enc}`,
+          `/api/v1/inboxes/${enc}`,
+          `/api/v1/inboxes/${enc}/messages`,
+          `/api/v1/inboxes/${enc}/messages/latest`,
+          `/api/v1/messages/${enc}`,
+          `/api/v1/inboxes/${enc}/messages/wait`,
+          `/api/v1/inboxes/${enc}/messages/wait`,
+          `/api/v1/inboxes/${enc}/messages/wait`,
+        ],
+      );
+      // wait's own query survives; the id never became query/fragment
+      const waitQuery = new URLSearchParams(srv.seen[5].split("?")[1]);
+      assert.equal(waitQuery.get("require"), "otp");
+      assert.deepEqual([...waitQuery.keys()].sort(), ["require", "since", "timeout"]);
+    } finally {
+      await srv.close();
+    }
+  });
+}
+
+for (const id of [".", "..", ""]) {
+  test(`real HTTP server: ${JSON.stringify(id)} is rejected client-side and never reaches the network`, async () => {
+    const srv = await startRecordingServer();
+    try {
+      const c = new MailsocketClient(API_KEY, { baseUrl: srv.baseUrl });
+      const calls = [
+        () => c.getInbox(id),
+        () => c.deleteInbox(id),
+        () => c.listMessages(id),
+        () => c.getLatest(id),
+        () => c.getMessage(id),
+        () => c.waitForOtp(id),
+        () => c.waitForLink(id),
+        () => c.wait(id),
+        () => c.waitForOtp(id, { timeout: 0 }), // fails on the id, not WaitTimeout
+      ];
+      await withRealFetch(async () => {
+        for (const call of calls) {
+          await assert.rejects(call, (err) => {
+            assert.ok(err instanceof MailsocketError, String(err));
+            assert.ok(!(err instanceof WaitTimeout), String(err));
+            assert.equal(err.code, "invalid_id");
+            return true;
+          });
+        }
+      });
+      assert.deepEqual(srv.seen, []);
+    } finally {
+      await srv.close();
+    }
+  });
+}
+
+// -- CEO F1 r3: fractional wait budget must not throw ERR_OUT_OF_RANGE --
+test("waitForOtp with a fractional remaining budget reaches the network (real server)", async () => {
+  const srv = await startRecordingServer();
+  try {
+    await withRealFetch(async () => {
+      const c = new MailsocketClient(API_KEY, { baseUrl: srv.baseUrl });
+      // 12345.6ms -> server timeout 12.3456s; the socket signal must be an integer.
+      const result = await c.waitForOtp("inbox_abc", { timeout: 12_345.6 });
+      assert.equal(result.otp, OTP_MESSAGE.otp);
+    });
+    assert.equal(srv.seen.length, 1);
+    assert.match(srv.seen[0], /^\/api\/v1\/inboxes\/inbox_abc\/messages\/wait\?/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("a fractional requestTimeoutMs does not throw ERR_OUT_OF_RANGE (real server)", async () => {
+  const srv = await startRecordingServer();
+  try {
+    await withRealFetch(async () => {
+      const c = new MailsocketClient(API_KEY, { baseUrl: srv.baseUrl, requestTimeoutMs: 2_500.5 });
+      await c.listMessages("inbox_abc");
+    });
+    assert.equal(srv.seen.length, 1);
+  } finally {
+    await srv.close();
+  }
 });

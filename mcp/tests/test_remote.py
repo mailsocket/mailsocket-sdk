@@ -538,12 +538,65 @@ def test_key_in_url_path_is_400_and_never_logged(upstream, caplog, path):
     assert _leaks(caplog.text, KEY_REAL) == []
     access = [rec.getMessage() for rec in caplog.records if rec.name == "mailsocket_mcp.access"]
     assert len(access) == 1 and " 400 " in access[0]
-    assert "ms_live_" not in access[0] and "***" in access[0]
+    assert "ms_live_" not in access[0]
+    assert access[0].startswith("POST /mcp/<redacted> 400 ")
 
 
-def test_access_log_path_redaction_even_if_request_not_refused(caplog):
-    """Belt and braces: the access-log path itself is scrubbed."""
-    assert remote._redact(f"/mcp/{KEY_REAL}", None) == "/mcp/***"
+PATH_BODY = "F1PathBodySecret0123456789"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/mcp/MS_LIVE_{PATH_BODY}",  # upper case
+        f"/mcp/Ms_LiVe_{PATH_BODY}",  # mixed case
+        f"/mcp/%256Ds_live_{PATH_BODY}",  # double-encoded "m"
+        f"/mcp/%25256D%2573_live_{PATH_BODY}",  # triple-encoded "m", double "s"
+        f"/mcp/%6D%53_LIVE_{PATH_BODY}",  # single-encoded, upper case
+    ],
+)
+def test_f1_case_and_multi_encoded_key_in_path_is_400_and_log_is_placeholder(upstream, caplog, path):
+    """F1 #3: POST /mcp/MS_LIVE_<body> and /mcp/%256Ds_live_<body> are refused
+    (credential_in_url) and the access log carries only /mcp/<redacted> —
+    the case-sensitive single-pass scrub used to log <body> verbatim."""
+    caplog.set_level(logging.DEBUG)
+    app = make_app(upstream)
+
+    async def go():
+        async with serving(app) as client:
+            return await client.post(path, headers=bearer(KEY_REAL), json=rpc("tools/list"))
+
+    r = run(go)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "credential_in_url"
+    assert upstream.calls == []
+    assert PATH_BODY not in r.text
+    # every SERVER-side record (the in-process test client's own "httpx2"
+    # request log is excluded — it is not part of the deployed server)
+    server_side = [rec.getMessage() for rec in caplog.records if not rec.name.startswith("httpx")]
+    assert server_side, "expected server-side log records"
+    assert [line for line in server_side if PATH_BODY in line] == []
+    access = [rec.getMessage() for rec in caplog.records if rec.name == "mailsocket_mcp.access"]
+    assert len(access) == 1
+    assert access[0].startswith("POST /mcp/<redacted> 400 ")
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        (f"/mcp/{KEY_REAL}", "/mcp/<redacted>"),
+        (f"/mcp/MS_LIVE_{PATH_BODY}", "/mcp/<redacted>"),
+        (f"/x/%256Ds_live_{PATH_BODY}", "/mcp/<redacted>"),  # 2 decodes
+        (f"/x/%25256Ds_live_{PATH_BODY}", "/mcp/<redacted>"),  # 3 decodes
+        (f"/x/%2525256Ds_live_{PATH_BODY}", f"/x/%2525256Ds_live_{PATH_BODY}"),  # 4: beyond the cap
+        ("/mcp", "/mcp"),
+        ("/healthz", "/healthz"),
+    ],
+)
+def test_access_log_path_is_placeholder_whenever_path_has_a_key(path, expected):
+    """Belt and braces: the access-log path helper itself (case-insensitive,
+    up to 3 extra percent-decoding rounds)."""
+    assert remote._log_path(path) == expected
 
 
 def test_access_log_has_no_headers_or_query(upstream, caplog):

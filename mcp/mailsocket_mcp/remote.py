@@ -68,6 +68,10 @@ KEY_RE = re.compile(r"^ms_live_[A-Za-z0-9_\-]{8,200}$")
 # Any query parameter that looks like a credential is refused outright.
 _CREDENTIAL_PARAMS = {"api_key", "apikey", "key", "token", "access_token", "authorization"}
 _KEY_LIKE = re.compile(r"ms_live_", re.IGNORECASE)
+# Access-log placeholder for any path that carries (or was refused for) a key.
+REDACTED_PATH = "/mcp/<redacted>"
+# How many extra percent-decoding rounds a path gets before key detection.
+_MAX_PATH_DECODES = 3
 WWW_AUTHENTICATE = 'Bearer realm="mailsocket"'
 KEY_HINT = "Send a valid key as `Authorization: Bearer ms_live_...`."
 DEFAULT_ALLOWED_HOST = "mcp.mailsocket.app"
@@ -142,6 +146,30 @@ def _bearer_key(headers: Headers) -> tuple[str | None, str | None]:
     if scheme.lower() != "bearer" or not KEY_RE.match(token):
         return None, "Malformed API key. " + KEY_HINT
     return token, None
+
+
+def _path_has_key(path: str) -> bool:
+    """True if ``ms_live_`` (any case) appears in the path as given OR after
+    up to ``_MAX_PATH_DECODES`` rounds of percent-decoding, so
+    ``/mcp/MS_LIVE_…`` and double-encoded ``/mcp/%256Ds_live_…`` are caught."""
+    candidate = path
+    for _ in range(_MAX_PATH_DECODES + 1):
+        if _KEY_LIKE.search(candidate):
+            return True
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return False
+
+
+def _log_path(path: str) -> str:
+    """Path for the access log: a fixed placeholder whenever the path carries
+    a key (the credential_in_url refusal uses the same test), else the path
+    with any ``ms_live_`` token scrubbed."""
+    if _path_has_key(path):
+        return REDACTED_PATH
+    return _redact(path, None)
 
 
 def _query_has_credential(query_string: bytes) -> bool:
@@ -253,12 +281,13 @@ class RemoteMCPApp:
             await self._dispatch(scope, receive, send_logged)
         finally:
             # Access log: method, path (NO query string), status, duration.
-            # Headers are never logged, so neither is the key; the path is
-            # scrubbed of any ms_live_ token in case a client put one there.
+            # Headers are never logged, so neither is the key. A path with a
+            # key in it (any case, up to 3x percent-encoded) is replaced by a
+            # fixed placeholder — never partially scrubbed.
             access_logger.info(
                 "%s %s %s %.0fms",
                 scope.get("method", "-"),
-                _redact(str(scope.get("path", "-")), None),
+                _log_path(str(scope.get("path", "-"))),
                 status_holder["status"],
                 (time.monotonic() - started) * 1000,
             )
@@ -278,7 +307,7 @@ class RemoteMCPApp:
             await _error(421, "invalid_host", "Invalid Host header.")(scope, receive, send)
             return
 
-        if _KEY_LIKE.search(unquote(path)):
+        if _path_has_key(path):
             # e.g. POST /mcp/ms_live_… — refuse it (the logged path is
             # redacted too, but the request must not proceed either).
             await _error(

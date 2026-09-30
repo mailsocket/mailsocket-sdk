@@ -26,7 +26,27 @@ const WAIT_SOCKET_BUFFER_MS = 10_000;
 /** Default retry delay (ms) when a 429 carries no Retry-After header. */
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 
-const USER_AGENT = "mailsocket-typescript/0.1.1";
+const USER_AGENT = "mailsocket-typescript/0.1.2";
+
+/**
+ * Percent-encode a caller-supplied id as ONE path segment (`/`, `?`, `#`,
+ * `%`, … are escaped by `encodeURIComponent`).
+ *
+ * An empty id and the bare dot segments `.` / `..` are rejected with a
+ * `MailsocketError` before any request is made: WHATWG URL parsing (used by
+ * `fetch`) normalises `.`/`..` — and their `%2E` forms — away, so they can
+ * never reach the server as a single segment. No real id is ever one of these.
+ */
+function seg(value: string): string {
+  const raw = String(value);
+  if (raw === "" || raw === "." || raw === "..") {
+    throw new MailsocketError(
+      `Invalid id ${JSON.stringify(raw)}: ids must be non-empty and not "." or "..".`,
+      { code: "invalid_id" },
+    );
+  }
+  return encodeURIComponent(raw);
+}
 
 /** The outcome of `waitForOtp` / `waitForLink` / `wait`. */
 export interface WaitResult {
@@ -54,7 +74,7 @@ export class MailsocketClient {
     }
     this.apiKey = apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.requestTimeoutMs = Math.ceil(options.requestTimeoutMs ?? 30_000);
     // performance.now() is monotonic (immune to wall-clock/NTP steps) and
     // already in ms, matching Python's time.monotonic(). Date.now() would let a
     // clock adjustment mid-wait corrupt the deadline arithmetic.
@@ -77,12 +97,12 @@ export class MailsocketClient {
   }
 
   async getInbox(inboxId: string): Promise<InboxDetail> {
-    const payload = await this.request<InboxDetail>("GET", `/inboxes/${inboxId}`);
+    const payload = await this.request<InboxDetail>("GET", `/inboxes/${seg(inboxId)}`);
     return payload.data;
   }
 
   async deleteInbox(inboxId: string): Promise<void> {
-    await this.request<unknown>("DELETE", `/inboxes/${inboxId}`);
+    await this.request<unknown>("DELETE", `/inboxes/${seg(inboxId)}`);
   }
 
   // -- messages -------------------------------------------------------------
@@ -97,19 +117,19 @@ export class MailsocketClient {
     if (options.hasOtp !== undefined) params["has_otp"] = options.hasOtp ? "true" : "false";
     if (options.subjectContains) params["subject_contains"] = options.subjectContains;
     if (options.sender) params["from"] = options.sender; // the API names this filter `from`
-    const payload = await this.request<MessageSummary[]>("GET", `/inboxes/${inboxId}/messages`, {
+    const payload = await this.request<MessageSummary[]>("GET", `/inboxes/${seg(inboxId)}/messages`, {
       params,
     });
     return this.asPage(payload);
   }
 
   async getLatest(inboxId: string): Promise<Message> {
-    const payload = await this.request<Message>("GET", `/inboxes/${inboxId}/messages/latest`);
+    const payload = await this.request<Message>("GET", `/inboxes/${seg(inboxId)}/messages/latest`);
     return payload.data;
   }
 
   async getMessage(messageId: string): Promise<Message> {
-    const payload = await this.request<Message>("GET", `/messages/${messageId}`);
+    const payload = await this.request<Message>("GET", `/messages/${seg(messageId)}`);
     return payload.data;
   }
 
@@ -137,6 +157,9 @@ export class MailsocketClient {
     require: RequireKind,
     options: WaitOptions,
   ): Promise<WaitResult> {
+    // Validate/encode the id up front so a bad id fails before any request
+    // (and even when the timeout is already exhausted).
+    const path = `/inboxes/${seg(inboxId)}/messages/wait`;
     const timeoutMs = options.timeout ?? 60_000;
     const deadline = this.now() + timeoutMs;
 
@@ -164,9 +187,11 @@ export class MailsocketClient {
 
       const { status, headers, body } = await this.fetchHttp(
         "GET",
-        `/inboxes/${inboxId}/messages/wait`,
+        path,
         { params },
-        serverTimeoutSeconds * 1000 + WAIT_SOCKET_BUFFER_MS,
+        // AbortSignal.timeout() needs an integer (a fractional remaining
+        // budget threw ERR_OUT_OF_RANGE before any network I/O).
+        Math.ceil(serverTimeoutSeconds * 1000) + WAIT_SOCKET_BUFFER_MS,
       );
       const envelope = this.parseJson(body);
 
