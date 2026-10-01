@@ -62,13 +62,13 @@ class FakeClient:
         return {"id": "inbox_1", "address": "x@in.inboxpipe.net"}
 
     def wait_for_otp(self, inbox_id, *, timeout=60.0, min_confidence=0.0, since=0):
-        self.wait_otp_calls.append((inbox_id, timeout, min_confidence))
+        self.wait_otp_calls.append((inbox_id, timeout, min_confidence, since))
         if isinstance(self.wait_otp, Exception):
             raise self.wait_otp
         return self.wait_otp
 
     def wait_for_link(self, inbox_id, *, timeout=60.0, since=0):
-        self.wait_link_calls.append((inbox_id, timeout))
+        self.wait_link_calls.append((inbox_id, timeout, since))
         if isinstance(self.wait_link, Exception):
             raise self.wait_link
         return self.wait_link
@@ -233,10 +233,11 @@ def test_wait_for_otp_returns_otp_and_confidence(fake_client):
     assert result.is_error is False
     text = result.content[0].text
     assert '"123456"' in text
-    inbox_id, timeout, min_conf = fake_client.wait_otp_calls[0]
+    inbox_id, timeout, min_conf, since = fake_client.wait_otp_calls[0]
     assert inbox_id == "inbox_abc"
     assert timeout == 60
     assert min_conf == 0.0
+    assert since == 0  # absent -> SDK default unchanged
 
 
 def test_wait_for_otp_timeout_is_clamped(fake_client):
@@ -244,12 +245,42 @@ def test_wait_for_otp_timeout_is_clamped(fake_client):
 
     call_tool("wait_for_otp", {"inbox_id": "inbox_abc", "timeout": 9999})
 
-    _, timeout, _ = fake_client.wait_otp_calls[0]
+    _, timeout, _, _ = fake_client.wait_otp_calls[0]
     assert timeout == MAX_WAIT_TIMEOUT
 
     call_tool("wait_for_otp", {"inbox_id": "inbox_abc", "timeout": 0})
-    _, timeout, _ = fake_client.wait_otp_calls[1]
+    _, timeout, _, _ = fake_client.wait_otp_calls[1]
     assert timeout == 1.0
+
+
+def test_wait_for_otp_since_passed_through(fake_client):
+    fake_client.wait_otp = FakeWaitResult(otp="123456")
+
+    call_tool("wait_for_otp", {"inbox_id": "inbox_abc", "since": "msg_111"})
+
+    inbox_id, _, _, since = fake_client.wait_otp_calls[0]
+    assert inbox_id == "inbox_abc"
+    assert since == "msg_111"
+
+
+def test_wait_for_otp_result_carries_id_and_received_at(fake_client):
+    fake_client.wait_otp = FakeWaitResult(
+        otp="123456",
+        confidence=0.95,
+        message={
+            "subject": "Your code",
+            "from": "Acme <no-reply@acme.test>",
+            "id": "msg_999",
+            "received_at": "2024-01-01T00:00:00Z",
+        },
+    )
+
+    result = call_tool("wait_for_otp", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is False
+    text = result.content[0].text
+    assert '"msg_999"' in text
+    assert '"2024-01-01T00:00:00Z"' in text
 
 
 def test_wait_for_otp_wait_timeout_is_clean_error(fake_client):
@@ -274,6 +305,38 @@ def test_wait_for_link_returns_magic_link(fake_client):
 
     assert result.is_error is False
     assert "https://example.test/go?token=abc" in result.content[0].text
+    inbox_id, timeout, since = fake_client.wait_link_calls[0]
+    assert inbox_id == "inbox_abc"
+    assert since == 0  # absent -> SDK default unchanged
+
+
+def test_wait_for_link_since_passed_through(fake_client):
+    fake_client.wait_link = FakeWaitResult(magic_link="https://example.test/go?token=abc")
+
+    call_tool("wait_for_link", {"inbox_id": "inbox_abc", "since": "2024-01-01T00:00:00Z"})
+
+    inbox_id, _, since = fake_client.wait_link_calls[0]
+    assert inbox_id == "inbox_abc"
+    assert since == "2024-01-01T00:00:00Z"
+
+
+def test_wait_for_link_result_carries_id_and_received_at(fake_client):
+    fake_client.wait_link = FakeWaitResult(
+        magic_link="https://example.test/go?token=abc",
+        message={
+            "subject": "Sign in",
+            "from": "Acme <no-reply@acme.test>",
+            "id": "msg_777",
+            "received_at": "2024-02-02T00:00:00Z",
+        },
+    )
+
+    result = call_tool("wait_for_link", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is False
+    text = result.content[0].text
+    assert '"msg_777"' in text
+    assert '"2024-02-02T00:00:00Z"' in text
 
 
 # -- create_inbox / list_messages / delete -----------------------------------
@@ -365,13 +428,13 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """Versions match everywhere: MCP 0.2.2 (pyproject, server.json, __version__)
+    """Versions match everywhere: MCP 0.2.3 (pyproject, server.json, __version__)
     and its Python SDK sibling 0.1.3 (pyproject, __version__, user agent)."""
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.2.2"
+    expected = "0.2.3"
     expected_sdk = "0.1.3"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())

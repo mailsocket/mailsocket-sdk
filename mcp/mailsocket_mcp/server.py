@@ -52,7 +52,7 @@ __all__ = [
 # Canonical version, re-exported as ``mailsocket_mcp.__version__`` (see
 # __init__.py). Defined here, not in __init__.py, because __init__.py imports
 # this module at package-load time and a circular self-import would break.
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 # The headline wait is bounded: an agent can request up to the transport's
 # ceiling as the overall deadline (clamped), though transport overhead can push
@@ -461,6 +461,7 @@ def wait_for_otp(
     inbox_id: str,
     timeout: float = DEFAULT_WAIT_TIMEOUT,
     min_confidence: float = 0.0,
+    since: str | int | float | None = None,
 ) -> dict:
     """Block (bounded) until an OTP arrives in ``inbox_id`` and return it.
 
@@ -477,21 +478,35 @@ def wait_for_otp(
     slightly after the ceiling in practice. On a timeout just call it again.
     ``min_confidence`` filters out low-confidence OTP extractions.
 
+    ``since`` (optional) only matches messages that arrived after this point:
+    an ISO8601 timestamp, unix seconds, or a message id (``msg_...``, meaning
+    "only messages after that one"; an unknown id falls back to the oldest
+    message, so prefer a timestamp if unsure). A fresh inbox straight from
+    ``create_inbox`` needs nothing here — the default already matches
+    anything in it. When REUSING an inbox for a second code, pass either the
+    time just before you triggered this email, or the ``id`` of the last
+    message you saw, so you get the NEW code instead of the oldest one still
+    retained in the inbox.
+
     Side effects: none beyond the long-poll HTTP call(s) needed to satisfy the
     wait (``openWorldHint`` — it talks to the live mailsocket API and blocks
     for up to ``timeout`` seconds). Returns the OTP string, a confidence
-    score, and the subject/from of the matching message. Raises a clean tool
-    error (``WaitTimeout``) if nothing matching arrives before the deadline.
+    score, the subject/from of the matching message, and its ``id`` /
+    ``received_at`` (chain ``since=<id>`` into the next call on this inbox).
+    Raises a clean tool error (``WaitTimeout``) if nothing matching arrives
+    before the deadline.
     """
+    kwargs = {} if since is None else {"since": since}
     result = _get_client().wait_for_otp(
         inbox_id,
         timeout=_clamp_timeout(timeout),
         min_confidence=min_confidence,
+        **kwargs,
     )
     return {
         "otp": result.otp,
         "confidence": result.confidence,
-        **_ctx(result, ("subject", "from")),
+        **_ctx(result, ("subject", "from", "id", "received_at")),
     }
 
 
@@ -502,6 +517,7 @@ def wait_for_otp(
 def wait_for_link(
     inbox_id: str,
     timeout: float = DEFAULT_WAIT_TIMEOUT,
+    since: str | int | float | None = None,
 ) -> dict:
     """Block (bounded) until a magic link arrives in ``inbox_id`` and return it.
 
@@ -518,15 +534,28 @@ def wait_for_link(
     return slightly after the ceiling in practice. On a timeout just call it
     again.
 
+    ``since`` (optional) only matches messages that arrived after this point:
+    an ISO8601 timestamp, unix seconds, or a message id (``msg_...``, meaning
+    "only messages after that one"; an unknown id falls back to the oldest
+    message, so prefer a timestamp if unsure). A fresh inbox straight from
+    ``create_inbox`` needs nothing here — the default already matches
+    anything in it. When REUSING an inbox for a second link, pass either the
+    time just before you triggered this email, or the ``id`` of the last
+    message you saw, so you get the NEW link instead of the oldest one still
+    retained in the inbox.
+
     Side effects: none beyond the long-poll HTTP call(s) needed to satisfy the
     wait (``openWorldHint`` — it talks to the live mailsocket API and blocks
-    for up to ``timeout`` seconds). Raises a clean tool error (``WaitTimeout``)
-    if no link arrives before the deadline.
+    for up to ``timeout`` seconds). Returns the magic link, the subject/from
+    of the matching message, and its ``id`` / ``received_at`` (chain
+    ``since=<id>`` into the next call on this inbox). Raises a clean tool
+    error (``WaitTimeout``) if no link arrives before the deadline.
     """
-    result = _get_client().wait_for_link(inbox_id, timeout=_clamp_timeout(timeout))
+    kwargs = {} if since is None else {"since": since}
+    result = _get_client().wait_for_link(inbox_id, timeout=_clamp_timeout(timeout), **kwargs)
     return {
         "magic_link": result.magic_link,
-        **_ctx(result, ("subject", "from")),
+        **_ctx(result, ("subject", "from", "id", "received_at")),
     }
 
 
