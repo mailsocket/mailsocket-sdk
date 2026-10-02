@@ -1,5 +1,10 @@
 # mailsocket SDKs & MCP server
 
+[![PyPI - mailsocket](https://img.shields.io/pypi/v/mailsocket?label=PyPI%3A%20mailsocket)](https://pypi.org/project/mailsocket/)
+[![PyPI - mailsocket-mcp](https://img.shields.io/pypi/v/mailsocket-mcp?label=PyPI%3A%20mailsocket-mcp)](https://pypi.org/project/mailsocket-mcp/)
+[![npm - mailsocket-sdk](https://img.shields.io/npm/v/mailsocket-sdk?label=npm%3A%20mailsocket-sdk)](https://www.npmjs.com/package/mailsocket-sdk)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 [mailsocket](https://mailsocket.app) is an inbox API for OTP and magic-link
 signup automation: email in, JSON out. `GET
 /inboxes/{id}/messages/wait?require=otp` blocks and returns the OTP the
