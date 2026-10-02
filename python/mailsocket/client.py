@@ -10,6 +10,7 @@ import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 
 from .errors import AuthError, MailsocketError, NotFound, RateLimited, WaitTimeout
 
@@ -79,14 +80,30 @@ class Page:
         return f"Page(data={self.data!r}, pagination={self.pagination!r})"
 
 
+@dataclass(frozen=True, eq=False)
 class WaitResult:
-    """The outcome of a ``wait_for_otp`` / ``wait_for_link`` / ``wait`` call."""
+    """The outcome of a ``wait_for_otp`` / ``wait_for_link`` / ``wait`` call.
 
-    def __init__(self, message: dict):
-        self.message = message
-        self.otp = message.get("otp")
-        self.confidence = message.get("otp_confidence")
-        self.magic_link = message.get("magic_link")
+    #31 (trust-audit-OUT.md): a frozen dataclass, backward compatible with
+    the plain-class shape it replaces — same four public attributes
+    (``.message``, ``.otp``, ``.confidence``, ``.magic_link``), the derived
+    ``.link`` property, and the same ``repr()``/``str()``. Instances are now
+    immutable (``frozen=True``); ``eq=False`` keeps equality/hashing
+    identity-based exactly as the old plain class, since ``message`` is a
+    dict and value-equality would make ``hash()`` raise ``TypeError``.
+    """
+
+    message: dict
+    otp: str | None = field(init=False)
+    confidence: float | None = field(init=False)
+    magic_link: str | None = field(init=False)
+
+    def __post_init__(self):
+        # frozen=True disallows plain attribute assignment even inside
+        # __post_init__, hence object.__setattr__.
+        object.__setattr__(self, "otp", self.message.get("otp"))
+        object.__setattr__(self, "confidence", self.message.get("otp_confidence"))
+        object.__setattr__(self, "magic_link", self.message.get("magic_link"))
 
     @property
     def link(self):
@@ -192,9 +209,16 @@ class Client:
         *,
         timeout: float = 60.0,
         min_confidence: float = 0.0,
-        since=0,
+        since=None,
     ) -> WaitResult:
-        """Wait for an OTP. Returns a :class:`WaitResult` with ``.otp`` etc."""
+        """Wait for an OTP. Returns a :class:`WaitResult` with ``.otp`` etc.
+
+        ``since`` defaults to ``None``, which omits the param entirely so the
+        server's own default applies (the request start time) — a caller
+        only sees messages that arrive during this call, never a stale OTP
+        already sitting in a reused inbox. Pass ``since=0`` to restore the
+        old behaviour: match any message already in the inbox.
+        """
         return self._wait(
             inbox_id,
             require="otp",
@@ -203,8 +227,12 @@ class Client:
             since=since,
         )
 
-    def wait_for_link(self, inbox_id: str, *, timeout: float = 60.0, since=0) -> WaitResult:
-        """Wait for a magic link. Returns a :class:`WaitResult` with ``.link``."""
+    def wait_for_link(self, inbox_id: str, *, timeout: float = 60.0, since=None) -> WaitResult:
+        """Wait for a magic link. Returns a :class:`WaitResult` with ``.link``.
+
+        ``since`` defaults to ``None`` (omitted -> server uses the request
+        start time). Pass ``since=0`` to include messages already in the inbox.
+        """
         return self._wait(
             inbox_id, require="link", timeout=timeout, min_confidence=None, since=since
         )
@@ -215,9 +243,13 @@ class Client:
         *,
         timeout: float = 60.0,
         min_confidence: float = 0.0,
-        since=0,
+        since=None,
     ) -> WaitResult:
-        """Wait for either an OTP or a magic link."""
+        """Wait for either an OTP or a magic link.
+
+        ``since`` defaults to ``None`` (omitted -> server uses the request
+        start time). Pass ``since=0`` to include messages already in the inbox.
+        """
         return self._wait(
             inbox_id,
             require="any",
@@ -288,7 +320,7 @@ class Client:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "mailsocket-python/0.1.3",
+            "User-Agent": "mailsocket-python/0.2.0",
         }
         headers.update(self._extra_headers)
         # Set last so nothing in extra_headers can ever replace it.

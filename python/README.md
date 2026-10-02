@@ -46,9 +46,9 @@ client = Client(api_key, base_url="https://dash.mailsocket.app/api/v1")
 ### The moat
 
 ```python
-result = client.wait_for_otp("inbox_abc123", timeout=60, min_confidence=0.0, since=0)
-result = client.wait_for_link("inbox_abc123", timeout=60, since=0)
-result = client.wait("inbox_abc123", timeout=60, min_confidence=0.0, since=0)  # otp OR link
+result = client.wait_for_otp("inbox_abc123", timeout=60, min_confidence=0.0, since=None)
+result = client.wait_for_link("inbox_abc123", timeout=60, since=None)
+result = client.wait("inbox_abc123", timeout=60, min_confidence=0.0, since=None)  # otp OR link
 ```
 
 All three return a `WaitResult` and take keyword-only arguments after
@@ -57,9 +57,16 @@ call with no extra arguments for the common case.
 
 | Method | Keyword args (all optional, keyword-only) | Returns |
 | --- | --- | --- |
-| `wait_for_otp(inbox_id, ...)` | `timeout=60`, `min_confidence=0.0`, `since=0` | `WaitResult` |
-| `wait_for_link(inbox_id, ...)` | `timeout=60`, `since=0` | `WaitResult` |
-| `wait(inbox_id, ...)` | `timeout=60`, `min_confidence=0.0`, `since=0` | `WaitResult` (otp OR link) |
+| `wait_for_otp(inbox_id, ...)` | `timeout=60`, `min_confidence=0.0`, `since=None` | `WaitResult` |
+| `wait_for_link(inbox_id, ...)` | `timeout=60`, `since=None` | `WaitResult` |
+| `wait(inbox_id, ...)` | `timeout=60`, `min_confidence=0.0`, `since=None` | `WaitResult` (otp OR link) |
+
+`since=None` (the default) omits the param, so the server uses its own
+default: the request start time — a code that arrives during this call is
+caught, and a stale code already in a reused inbox is not. Pass `since=0` to
+restore the old "any message already in the inbox" behaviour (useful right
+after `create_inbox`, where there's nothing stale to match), or a message id
+/ timestamp to continue after a specific point.
 
 `WaitResult` exposes `.otp`, `.confidence`, `.magic_link` (and `.link` as an
 alias), plus the full `.message` dict. `str(result)` is the OTP (or the link).
@@ -97,4 +104,9 @@ invalid id never reaches the network.
 
 ## Changelog
 
+- **0.2.0** — BEHAVIOUR CHANGE: `wait_for_otp`/`wait_for_link`/`wait` now
+  default `since=None`, which omits the param so the server uses the
+  request start time, instead of the old `since=0` ("any message already
+  in the inbox"). The old default silently returned a STALE OTP/link from a
+  reused inbox. Pass `since=0` explicitly to keep the old behaviour.
 - **0.1.3** — `_seg` now rejects an empty id or a bare `.`/`..` id with a `MailsocketError` (`code="invalid_id"`) before any request is made, matching the TypeScript SDK's contract.

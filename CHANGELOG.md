@@ -6,6 +6,14 @@ independently; see the per-package sections below.
 
 ## mailsocket (PyPI, Python SDK)
 
+### 0.2.0
+- **Behaviour change:** `wait_for_otp`, `wait_for_link` and `wait` now default
+  `since` to "omitted", so the server matches only mail that arrives after the
+  call starts. Before, the default was `since=0`, which could return an older
+  code already sitting in a reused inbox. Pass `since=0` to keep the old
+  behaviour.
+- Ships `py.typed`; `WaitResult` is a frozen dataclass.
+
 ### 0.1.3
 - `_seg` now rejects an empty id or a bare `.`/`..` id with a
   `MailsocketError` (`code="invalid_id"`) before any request is made,
@@ -25,6 +33,12 @@ independently; see the per-package sections below.
 - First publish.
 
 ## mailsocket-mcp (PyPI, MCP server)
+
+### 0.3.0
+- Requires `mailsocket>=0.2.0`: `wait_for_otp` / `wait_for_link` match only
+  mail that arrives after the call unless you pass `since`.
+- Explicit `since=0` is passed through unchanged.
+
 
 ### 0.2.3
 - `wait_for_otp` / `wait_for_link` accept an optional `since` (ISO8601, unix
@@ -49,6 +63,11 @@ independently; see the per-package sections below.
   `get_latest`, `delete_inbox` as MCP tools, wrapping the Python SDK.
 
 ## mailsocket-sdk (npm, TypeScript SDK)
+
+### 0.2.0
+- **Behaviour change:** `since` is omitted by default (server uses the request
+  start). Pass `since: 0` to include messages already in the inbox.
+
 
 ### 0.1.3
 - Added a CommonJS build (`dist/cjs`) alongside ESM, so

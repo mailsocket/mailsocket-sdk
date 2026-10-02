@@ -3,7 +3,7 @@
 from .client import Client, Page, WaitResult
 from .errors import AuthError, MailsocketError, NotFound, RateLimited, WaitTimeout
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 __all__ = [
     "Client",

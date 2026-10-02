@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mailsocket"
-version = "0.1.3"
+version = "0.2.0"
 description = "Official Python client for the mailsocket REST API — one line to wait for an OTP."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Email",
+    "Typing :: Typed",
 ]
 dependencies = []
 
@@ -35,6 +36,9 @@ Issues = "https://github.com/mailsocket/mailsocket-sdk/issues"
 
 [tool.setuptools]
 packages = ["mailsocket"]
+
+[tool.setuptools.package-data]
+mailsocket = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

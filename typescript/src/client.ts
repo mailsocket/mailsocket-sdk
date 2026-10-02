@@ -26,7 +26,7 @@ const WAIT_SOCKET_BUFFER_MS = 10_000;
 /** Default retry delay (ms) when a 429 carries no Retry-After header. */
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 
-const USER_AGENT = "mailsocket-typescript/0.1.3";
+const USER_AGENT = "mailsocket-typescript/0.2.0";
 
 /**
  * Percent-encode a caller-supplied id as ONE path segment (`/`, `?`, `#`,
@@ -178,9 +178,13 @@ export class MailsocketClient {
         timeout: String(serverTimeoutSeconds),
         require,
       };
-      // Default since=0 ("any existing unseen code"), matching the Python SDK
-      // and both READMEs — so a pre-existing OTP is caught on the first call.
-      params["since"] = String(options.since ?? 0);
+      // Default omits `since` entirely so the server uses the request start
+      // time: a code that arrives during this call is matched, a stale one
+      // already sitting in a reused inbox is not. Pass since=0 explicitly to
+      // restore the old behaviour (match anything already in the inbox).
+      if (options.since !== undefined) {
+        params["since"] = String(options.since);
+      }
       if (require !== "link" && options.minConfidence !== undefined) {
         params["min_confidence"] = String(options.minConfidence);
       }

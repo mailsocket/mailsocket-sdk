@@ -61,13 +61,13 @@ class FakeClient:
         self.created.append(label)
         return {"id": "inbox_1", "address": "x@in.inboxpipe.net"}
 
-    def wait_for_otp(self, inbox_id, *, timeout=60.0, min_confidence=0.0, since=0):
+    def wait_for_otp(self, inbox_id, *, timeout=60.0, min_confidence=0.0, since=None):
         self.wait_otp_calls.append((inbox_id, timeout, min_confidence, since))
         if isinstance(self.wait_otp, Exception):
             raise self.wait_otp
         return self.wait_otp
 
-    def wait_for_link(self, inbox_id, *, timeout=60.0, since=0):
+    def wait_for_link(self, inbox_id, *, timeout=60.0, since=None):
         self.wait_link_calls.append((inbox_id, timeout, since))
         if isinstance(self.wait_link, Exception):
             raise self.wait_link
@@ -237,7 +237,7 @@ def test_wait_for_otp_returns_otp_and_confidence(fake_client):
     assert inbox_id == "inbox_abc"
     assert timeout == 60
     assert min_conf == 0.0
-    assert since == 0  # absent -> SDK default unchanged
+    assert since is None  # absent -> SDK omits since (server uses request start time)
 
 
 def test_wait_for_otp_timeout_is_clamped(fake_client):
@@ -261,6 +261,17 @@ def test_wait_for_otp_since_passed_through(fake_client):
     inbox_id, _, _, since = fake_client.wait_otp_calls[0]
     assert inbox_id == "inbox_abc"
     assert since == "msg_111"
+
+
+def test_wait_for_otp_explicit_since_zero_passed_through(fake_client):
+    """since=0 (include messages already in the inbox) must reach the SDK as 0,
+    not be dropped as falsy and turned into the new request-start default."""
+    fake_client.wait_otp = FakeWaitResult(otp="123456")
+
+    call_tool("wait_for_otp", {"inbox_id": "inbox_abc", "since": 0})
+
+    _, _, _, since = fake_client.wait_otp_calls[0]
+    assert since == 0
 
 
 def test_wait_for_otp_result_carries_id_and_received_at(fake_client):
@@ -307,7 +318,7 @@ def test_wait_for_link_returns_magic_link(fake_client):
     assert "https://example.test/go?token=abc" in result.content[0].text
     inbox_id, timeout, since = fake_client.wait_link_calls[0]
     assert inbox_id == "inbox_abc"
-    assert since == 0  # absent -> SDK default unchanged
+    assert since is None  # absent -> SDK omits since (server uses request start time)
 
 
 def test_wait_for_link_since_passed_through(fake_client):
@@ -428,14 +439,14 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """Versions match everywhere: MCP 0.2.3 (pyproject, server.json, __version__)
-    and its Python SDK sibling 0.1.3 (pyproject, __version__, user agent)."""
+    """Versions match everywhere: MCP 0.3.0 (pyproject, server.json, __version__)
+    and its Python SDK sibling 0.2.0 (pyproject, __version__, user agent)."""
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.2.3"
-    expected_sdk = "0.1.3"
+    expected = "0.3.0"
+    expected_sdk = "0.2.0"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected

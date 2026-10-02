@@ -1,6 +1,7 @@
 """Offline unit tests for the mailsocket Python SDK (mocked transport, no network)."""
 
 import json
+import urllib.parse
 
 import pytest
 
@@ -107,6 +108,70 @@ def test_wait_for_otp_returns_on_first_200(monkeypatch):
     assert result.confidence == 0.95
     assert str(result) == "123456"
     assert len(transport.calls) == 1
+
+
+def test_wait_result_equality_and_hash_are_identity_based():
+    """R2 FIX 3 (GPT review): frozen=True makes WaitResult immutable, but
+    equality/hash must stay identity-based exactly as the old plain class —
+    value-equality would make hash() raise TypeError because ``message``
+    is an unhashable dict."""
+    a = WaitResult(dict(OTP_MESSAGE))
+    b = WaitResult(dict(OTP_MESSAGE))
+
+    assert a == a
+    assert a != b  # same field values, but distinct instances
+    assert hash(a) == hash(a)
+    assert hash(a) != hash(b) or a is b  # identity-based hash, no collision assumed
+    assert {a, b} == {a, b}  # hashable: usable in a set/dict key
+
+
+def test_wait_for_otp_default_since_is_omitted(monkeypatch):
+    """since=None default must OMIT the `since` param so the server uses the
+    request start time, not match a stale message already in a reused inbox.
+    Revert-proof: restoring since=0 as the default fails this test."""
+    client, transport = make_client([(200, {}, {"data": OTP_MESSAGE})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.wait_for_otp("inbox_abc", timeout=60)
+
+    _, url = transport.calls[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    assert "since" not in query
+
+
+def test_wait_for_link_default_since_is_omitted(monkeypatch):
+    client, transport = make_client([(200, {}, {"data": LINK_MESSAGE})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.wait_for_link("inbox_abc", timeout=60)
+
+    _, url = transport.calls[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    assert "since" not in query
+
+
+def test_wait_default_since_is_omitted(monkeypatch):
+    client, transport = make_client([(200, {}, {"data": OTP_MESSAGE})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.wait("inbox_abc", timeout=60)
+
+    _, url = transport.calls[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    assert "since" not in query
+
+
+def test_wait_for_otp_explicit_since_zero_still_sent(monkeypatch):
+    """Explicit since=0 ("include messages already in the inbox") must still
+    be forwarded as a literal 0 on the wire."""
+    client, transport = make_client([(200, {}, {"data": OTP_MESSAGE})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.wait_for_otp("inbox_abc", timeout=60, since=0)
+
+    _, url = transport.calls[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    assert query["since"] == ["0"]
 
 
 def test_wait_keeps_polling_through_204s_then_returns(monkeypatch):
@@ -510,13 +575,13 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """0.1.3 must match everywhere: pyproject, __version__, user agent."""
+    """Version must match everywhere: pyproject, __version__, user agent."""
     import re
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.1.3"
+    expected = "0.2.0"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected

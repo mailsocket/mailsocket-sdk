@@ -79,10 +79,18 @@ test("waitForOtp resolves with otp on first 200", async () => {
   assert.ok(calls[0].url.includes("require=otp"));
 });
 
-test("waitForOtp defaults since=0 when omitted (parity with Python; catches a pre-existing OTP)", async () => {
+test("waitForOtp omits since by default (server uses request start time; no stale OTP from a reused inbox)", async () => {
   const calls = installFetch([{ status: 200, body: JSON.stringify({ data: OTP_MESSAGE }) }]);
 
   await client().waitForOtp("inbox_abc");
+
+  assert.equal(new URL(calls[0].url).searchParams.get("since"), null);
+});
+
+test("waitForOtp sends an explicit since=0 literally (old behaviour, opt-in)", async () => {
+  const calls = installFetch([{ status: 200, body: JSON.stringify({ data: OTP_MESSAGE }) }]);
+
+  await client().waitForOtp("inbox_abc", { since: 0 });
 
   assert.equal(new URL(calls[0].url).searchParams.get("since"), "0");
 });
@@ -300,13 +308,13 @@ test("network failure / socket abort is wrapped as MailsocketError (ocr HIGH)", 
   );
 });
 
-test("metadata consistency: 0.1.3 matches package.json/package-lock/USER_AGENT", async () => {
+test("metadata consistency: 0.2.0 matches package.json/package-lock/USER_AGENT", async () => {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const path = await import("node:path");
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const expected = "0.1.3";
+  const expected = "0.2.0";
 
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(pkg.version, expected);
@@ -475,7 +483,7 @@ for (const [id, enc] of WIRE_IDS) {
       // wait's own query survives; the id never became query/fragment
       const waitQuery = new URLSearchParams(srv.seen[5].split("?")[1]);
       assert.equal(waitQuery.get("require"), "otp");
-      assert.deepEqual([...waitQuery.keys()].sort(), ["require", "since", "timeout"]);
+      assert.deepEqual([...waitQuery.keys()].sort(), ["require", "timeout"]);
     } finally {
       await srv.close();
     }

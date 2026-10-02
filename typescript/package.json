@@ -1,6 +1,6 @@
 {
   "name": "mailsocket-sdk",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Official TypeScript client for the mailsocket REST API — one line to wait for an OTP.",
   "type": "module",
   "main": "./dist/cjs/index.cjs",

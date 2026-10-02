@@ -57,26 +57,35 @@ const client = new MailsocketClient(apiKey, { baseUrl: "https://dash.mailsocket.
 ### The moat
 
 ```ts
-const otpResult = await client.waitForOtp("inbox_abc123", { timeout: 60_000, minConfidence: 0, since: 0 });
-const linkResult = await client.waitForLink("inbox_abc123", { timeout: 60_000, since: 0 });
-const eitherResult = await client.wait("inbox_abc123", { timeout: 60_000, minConfidence: 0, since: 0 }); // otp OR link
+const otpResult = await client.waitForOtp("inbox_abc123", { timeout: 60_000, minConfidence: 0 });
+const linkResult = await client.waitForLink("inbox_abc123", { timeout: 60_000 });
+const eitherResult = await client.wait("inbox_abc123", { timeout: 60_000, minConfidence: 0 }); // otp OR link
 ```
 
-All three return a `Promise<WaitResult>`. The options object shown above is
-optional and its fields are the defaults — call with no second argument for
-the common case.
+All three return a `Promise<WaitResult>`. The options object is optional;
+`timeout`/`minConfidence` shown above are the defaults — call with no second
+argument for the common case. `since` has no default value shown because
+omitting it (the default) means "server picks the request start time" —
+see below.
 
 | Method | Options (all optional) | Returns |
 | --- | --- | --- |
-| `waitForOtp(inboxId, options?)` | `timeout: 60000`, `minConfidence: 0`, `since: 0` | `Promise<WaitResult>` |
-| `waitForLink(inboxId, options?)` | `timeout: 60000`, `since: 0` | `Promise<WaitResult>` |
-| `wait(inboxId, options?)` | `timeout: 60000`, `minConfidence: 0`, `since: 0` | `Promise<WaitResult>` (otp OR link) |
+| `waitForOtp(inboxId, options?)` | `timeout: 60000`, `minConfidence: 0`, `since: <omitted>` | `Promise<WaitResult>` |
+| `waitForLink(inboxId, options?)` | `timeout: 60000`, `since: <omitted>` | `Promise<WaitResult>` |
+| `wait(inboxId, options?)` | `timeout: 60000`, `minConfidence: 0`, `since: <omitted>` | `Promise<WaitResult>` (otp OR link) |
 
 `WaitResult` exposes `.otp`, `.confidence`, `.magicLink` (and `.link` as an alias),
 plus the full `.message`. Semantics:
 
 - Each HTTP call blocks server-side for up to 25s (`timeout` is clamped to `[1, 25]`);
   the SDK re-calls until the **overall** `timeout` (milliseconds, default 60 000) elapses.
+- `since` (omitted by default) only matches messages received strictly after
+  that point. Omitting it uses the server's own default: the request start
+  time, so a code that arrives during this call is caught and a stale one
+  already sitting in a reused inbox is not. Pass `since: 0` to restore the
+  old "any message already in the inbox" behaviour (useful right after
+  `createInbox`, where there's nothing stale to match), or a message id /
+  timestamp to continue after a specific point.
 - `200` → the matching message. `204` → nothing yet, re-call immediately.
 - `429` → honours `Retry-After` and retries within the deadline. `404` → throws.
 - On overall deadline → `WaitTimeout`.
@@ -120,4 +129,8 @@ consumers with `tsc --noEmit`.
 
 ## Changelog
 
+- **0.2.0** — BEHAVIOUR CHANGE: `waitForOtp`/`waitForLink`/`wait` now omit
+  `since` by default instead of sending `since: 0` ("any message already in
+  the inbox"). The old default silently returned a STALE OTP/link from a
+  reused inbox. Pass `since: 0` explicitly to keep the old behaviour.
 - **0.1.3** — added a CommonJS build (`dist/cjs`) alongside ESM, so `require("mailsocket-sdk")` works. See Install above for both usages. `instanceof` checks on the error classes work across the two builds, even when an app loads the package via both `import` and `require()`.

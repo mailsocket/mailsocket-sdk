@@ -52,7 +52,7 @@ __all__ = [
 # Canonical version, re-exported as ``mailsocket_mcp.__version__`` (see
 # __init__.py). Defined here, not in __init__.py, because __init__.py imports
 # this module at package-load time and a circular self-import would break.
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 
 # The headline wait is bounded: an agent can request up to the transport's
 # ceiling as the overall deadline (clamped), though transport overhead can push
@@ -481,12 +481,13 @@ def wait_for_otp(
     ``since`` (optional) only matches messages that arrived after this point:
     an ISO8601 timestamp, unix seconds, or a message id (``msg_...``, meaning
     "only messages after that one"; an unknown id falls back to the oldest
-    message, so prefer a timestamp if unsure). A fresh inbox straight from
-    ``create_inbox`` needs nothing here — the default already matches
-    anything in it. When REUSING an inbox for a second code, pass either the
-    time just before you triggered this email, or the ``id`` of the last
-    message you saw, so you get the NEW code instead of the oldest one still
-    retained in the inbox.
+    message, so prefer a timestamp if unsure). Omitted (the default), the
+    server matches only messages that arrive during this call — the right
+    choice for a fresh inbox from ``create_inbox``. When REUSING an inbox for
+    a second code and you want to catch one that already arrived before this
+    call, pass either the time just before you triggered this email, or the
+    ``id`` of the last message you saw, so you get the NEW code instead of
+    missing it.
 
     Side effects: none beyond the long-poll HTTP call(s) needed to satisfy the
     wait (``openWorldHint`` — it talks to the live mailsocket API and blocks
@@ -537,12 +538,13 @@ def wait_for_link(
     ``since`` (optional) only matches messages that arrived after this point:
     an ISO8601 timestamp, unix seconds, or a message id (``msg_...``, meaning
     "only messages after that one"; an unknown id falls back to the oldest
-    message, so prefer a timestamp if unsure). A fresh inbox straight from
-    ``create_inbox`` needs nothing here — the default already matches
-    anything in it. When REUSING an inbox for a second link, pass either the
-    time just before you triggered this email, or the ``id`` of the last
-    message you saw, so you get the NEW link instead of the oldest one still
-    retained in the inbox.
+    message, so prefer a timestamp if unsure). Omitted (the default), the
+    server matches only messages that arrive during this call — the right
+    choice for a fresh inbox from ``create_inbox``. When REUSING an inbox for
+    a second link and you want to catch one that already arrived before this
+    call, pass either the time just before you triggered this email, or the
+    ``id`` of the last message you saw, so you get the NEW link instead of
+    missing it.
 
     Side effects: none beyond the long-poll HTTP call(s) needed to satisfy the
     wait (``openWorldHint`` — it talks to the live mailsocket API and blocks

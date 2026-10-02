@@ -84,7 +84,9 @@ export interface WaitOptions {
   timeout?: number;
   /** Minimum `otp_confidence` for an OTP match (default 0). */
   minConfidence?: number;
-  /** Only messages strictly after this point match (default 0 = epoch). */
+  /** Only messages strictly after this point match. Default: omitted, so the
+   * server uses the request start time (nothing already in the inbox
+   * matches). Pass 0 to match messages already in the inbox. */
   since?: string | number;
 }
 
