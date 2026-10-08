@@ -90,6 +90,14 @@ export interface WaitOptions {
   since?: string | number;
 }
 
+/** Result of `sendTestCode`. */
+export interface TestCodeResult {
+  /** Public id of the new message (`msg_...`). */
+  message_id: string;
+  /** When the message was stored (its `received_at`, ISO 8601). */
+  sent_at: string;
+}
+
 export interface ClientOptions {
   baseUrl?: string;
   /** Socket timeout for non-wait requests, in ms (default 30_000; 0 = no timeout). */

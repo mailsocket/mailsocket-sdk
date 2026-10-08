@@ -6,6 +6,15 @@ independently; see the per-package sections below.
 
 ## mailsocket (PyPI, Python SDK)
 
+### 0.3.0
+- New `Client.send_test_code(inbox_id)`: puts one sample OTP email (a random
+  6-digit code) straight into one of your inboxes, without going through the
+  mail server. Limits: 5 per inbox and 20 per account per hour (429 with
+  `retry_after`).
+- README samples take `started = time.time()` before triggering the email and
+  pass `since=started`, so a code that arrives before the wait starts is not
+  missed.
+
 ### 0.2.0
 - **Behaviour change:** `wait_for_otp`, `wait_for_link` and `wait` now default
   `since` to "omitted", so the server matches only mail that arrives after the
@@ -33,6 +42,10 @@ independently; see the per-package sections below.
 - First publish.
 
 ## mailsocket-mcp (PyPI, MCP server)
+
+### 0.4.0
+- New tool `send_test_code` (stdio and hosted). Requires `mailsocket>=0.3.0`.
+- 429 messages no longer end with a double period.
 
 ### 0.3.0
 - Requires `mailsocket>=0.2.0`: `wait_for_otp` / `wait_for_link` match only
@@ -63,6 +76,11 @@ independently; see the per-package sections below.
   `get_latest`, `delete_inbox` as MCP tools, wrapping the Python SDK.
 
 ## mailsocket-sdk (npm, TypeScript SDK)
+
+### 0.3.0
+- New `client.sendTestCode(inboxId)` (ESM + CommonJS).
+- README samples take `const started = Date.now() / 1000` before triggering the
+  email and pass `{ since: started }`.
 
 ### 0.2.0
 - **Behaviour change:** `since` is omitted by default (server uses the request

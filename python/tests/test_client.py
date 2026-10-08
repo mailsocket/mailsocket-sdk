@@ -557,6 +557,7 @@ def test_invalid_id_rejected_before_any_request_hits_real_server(raw):
             lambda: client.wait_for_otp(raw, timeout=5),
             lambda: client.wait_for_link(raw, timeout=5),
             lambda: client.wait(raw, timeout=5),
+            lambda: client.send_test_code(raw),
         ]
         for call in calls:
             with pytest.raises(MailsocketError) as exc_info:
@@ -581,7 +582,7 @@ def test_metadata_consistency_across_files():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.2.0"
+    expected = "0.3.0"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected
@@ -657,3 +658,138 @@ def test_no_extra_headers_is_backwards_compatible(monkeypatch):
     sent = capture.headers[0]
     assert set(sent) >= {"authorization", "accept", "user-agent"}
     assert "x-forwarded-proto" not in sent
+
+
+# -- send_test_code (POST /inboxes/{id}/test-code) ----------------------------
+
+TEST_CODE_DATA = {"message_id": "msg_test1", "sent_at": "2026-10-08T12:00:00Z"}
+
+
+def test_send_test_code_posts_and_returns_data(monkeypatch):
+    client, transport = make_client([(201, {}, {"data": TEST_CODE_DATA})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    data = client.send_test_code("inbox_abc")
+
+    assert data == TEST_CODE_DATA
+    assert transport.calls == [("POST", "https://example.test/api/v1/inboxes/inbox_abc/test-code")]
+
+
+def test_send_test_code_sends_no_body(monkeypatch):
+    seen = []
+
+    def capture(request, timeout=None):
+        seen.append((request.get_method(), request.data, dict(request.header_items())))
+
+        class _Resp:
+            headers = {}
+
+            def getcode(self):
+                return 201
+
+            def read(self):
+                return json.dumps({"data": TEST_CODE_DATA}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+    Client("ms_live_test1234567890", base_url="https://example.test/api/v1").send_test_code("inbox_abc")
+    method, body, headers = seen[0]
+    assert method == "POST"
+    assert body is None
+    assert headers["Authorization"] == "Bearer ms_live_test1234567890"
+
+
+def test_send_test_code_encodes_id_as_one_segment(monkeypatch):
+    client, transport = make_client([(201, {}, {"data": TEST_CODE_DATA})])
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    client.send_test_code("a/b?c")
+
+    assert transport.calls[0][1] == "https://example.test/api/v1/inboxes/a%2Fb%3Fc/test-code"
+
+
+def test_send_test_code_404_raises_not_found(monkeypatch):
+    responses = [(404, {}, {"error": {"code": "not_found", "message": "Resource not found.", "fields": {}}})]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    with pytest.raises(NotFound) as exc_info:
+        client.send_test_code("inbox_foreign")
+    assert exc_info.value.status == 404
+
+
+def test_send_test_code_429_raises_rate_limited_with_retry_after(monkeypatch):
+    slept = []
+    monkeypatch.setattr(mailsocket.client, "_sleep", lambda s: slept.append(s))
+    responses = [
+        (
+            429,
+            {"Retry-After": "1800"},
+            {"error": {"code": "rate_limited", "message": "Too many test codes. Try again at 13:00 UTC.", "fields": {}}},
+        )
+    ]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    with pytest.raises(RateLimited) as exc_info:
+        client.send_test_code("inbox_abc")
+    err = exc_info.value
+    assert err.retry_after == 1800.0
+    assert err.subcode == "rate_limited"
+    assert "Try again at" in str(err)
+    assert len(transport.calls) == 1  # never retried
+    assert slept == []
+
+
+def test_send_test_code_disabled_inbox_raises_mailsocket_error(monkeypatch):
+    responses = [
+        (
+            409,
+            {},
+            {"error": {"code": "inbox_disabled", "message": "This inbox is disabled. Enable it to receive a test code.", "fields": {}}},
+        )
+    ]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    with pytest.raises(MailsocketError) as exc_info:
+        client.send_test_code("inbox_abc")
+    err = exc_info.value
+    assert type(err) is MailsocketError
+    assert err.code == "inbox_disabled"
+    assert err.status == 409
+
+
+def test_send_test_code_401_raises_auth_error(monkeypatch):
+    responses = [(401, {}, {"error": {"code": "authentication_required", "message": "Auth required.", "fields": {}}})]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    with pytest.raises(AuthError):
+        client.send_test_code("inbox_abc")
+
+
+def test_readme_wait_samples_take_a_cutoff_before_the_trigger():
+    """Every runnable wait sample in the README passes since=started, with
+    started taken before the trigger (ux4 SDK follow-up)."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    blocks = readme.split("```python")[1:]
+    samples = [b.split("```")[0] for b in blocks]
+    waits = [s for s in samples if "wait_for_otp(" in s and "since=None" not in s]
+    assert waits, "no wait sample found"
+    for sample in waits:
+        assert "started = time.time()" in sample
+        assert sample.index("started = time.time()") < sample.index("wait_for_otp(")
+        for line in sample.splitlines():
+            if "wait_for_otp(" in line or "wait_for_link(" in line:
+                assert "since=" in line, line
+    assert "client.send_test_code(inbox" in readme

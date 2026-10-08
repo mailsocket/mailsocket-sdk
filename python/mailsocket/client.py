@@ -201,6 +201,25 @@ class Client:
         payload = self._request("GET", f"/messages/{_seg(message_id)}")
         return payload["data"]
 
+    def send_test_code(self, inbox_id: str) -> dict:
+        """Put one sample OTP email (a random 6-digit code) into ``inbox_id``.
+
+        Calls ``POST /inboxes/{id}/test-code`` and returns its ``data`` dict:
+        ``{"message_id": "msg_...", "sent_at": "..."}``. The message does NOT
+        go through the mail server: it is stored and parsed like real inbound
+        mail, so a pending or later wait (with a ``since`` from before this
+        call) returns it. Use it to prove the wait loop end to end without
+        sending real email.
+
+        Shares the dashboard "Send a test code" quota (5 per inbox, 20 per
+        account per hour). Errors: :class:`NotFound` for an unknown, deleted
+        or foreign inbox; :class:`RateLimited` (with ``retry_after``) over the
+        quota; :class:`MailsocketError` with ``code="inbox_disabled"``
+        (HTTP 409) for a disabled inbox.
+        """
+        payload = self._request("POST", f"/inboxes/{_seg(inbox_id)}/test-code")
+        return payload["data"]
+
     # -- the moat -------------------------------------------------------------
 
     def wait_for_otp(
@@ -320,7 +339,7 @@ class Client:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "mailsocket-python/0.2.0",
+            "User-Agent": "mailsocket-python/0.3.0",
         }
         headers.update(self._extra_headers)
         # Set last so nothing in extra_headers can ever replace it.

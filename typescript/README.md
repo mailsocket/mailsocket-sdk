@@ -9,10 +9,26 @@ import { MailsocketClient } from "mailsocket-sdk";
 const client = new MailsocketClient("ms_live_..."); // your API key from the dashboard
 const inbox = await client.createInbox("signup");   // { id: "inbox_...", address: "..." }
 
+const started = Date.now() / 1000;                  // unix seconds, taken BEFORE the trigger
 // hand inbox.address to whatever form sends the code, then:
-const { otp, confidence } = await client.waitForOtp(inbox.id); // waits up to 60s
+const { otp, confidence } = await client.waitForOtp(inbox.id, { since: started }); // waits up to 60s
 console.log(otp);         // "123456"
 console.log(confidence);  // 0.95
+```
+
+Take `started` just before you trigger the email and pass it as `since`: a
+code that lands before `waitForOtp` starts is still caught, and an older code
+in a reused inbox is not. `since` takes unix seconds (fractions are fine), an
+ISO 8601 string or a message id, so `Date.now() / 1000` is the right unit.
+
+No email handy? `client.sendTestCode(inbox.id)` drops a sample code into the
+inbox so you can see the whole loop work:
+
+```ts
+const started = Date.now() / 1000;
+await client.sendTestCode(inbox.id);                 // { message_id: "msg_...", sent_at: "..." }
+const { otp } = await client.waitForOtp(inbox.id, { since: started });
+console.log(otp);         // the sample code
 ```
 
 No polling loop. No regex over the email body. `waitForOtp` long-polls the server
@@ -53,20 +69,21 @@ const client = new MailsocketClient(apiKey, { baseUrl: "https://dash.mailsocket.
 | `listMessages(inboxId, { hasOtp?, subjectContains?, sender?, ... })` | `Promise<Page<MessageSummary>>` — `sender` maps to the API's `from` filter |
 | `getLatest(inboxId)` | `Promise<Message>` |
 | `getMessage(messageId)` | `Promise<Message>` |
+| `sendTestCode(inboxId)` | `Promise<TestCodeResult>` — `message_id`, `sent_at` of a sample OTP email put straight into the inbox (no mail server; 5 per inbox / 20 per account per hour) |
 
 ### The moat
 
 ```ts
-const otpResult = await client.waitForOtp("inbox_abc123", { timeout: 60_000, minConfidence: 0 });
-const linkResult = await client.waitForLink("inbox_abc123", { timeout: 60_000 });
-const eitherResult = await client.wait("inbox_abc123", { timeout: 60_000, minConfidence: 0 }); // otp OR link
+const started = Date.now() / 1000; // just before you trigger the email
+const otpResult = await client.waitForOtp("inbox_abc123", { timeout: 60_000, minConfidence: 0, since: started });
+const linkResult = await client.waitForLink("inbox_abc123", { timeout: 60_000, since: started });
+const eitherResult = await client.wait("inbox_abc123", { timeout: 60_000, minConfidence: 0, since: started }); // otp OR link
 ```
 
 All three return a `Promise<WaitResult>`. The options object is optional;
-`timeout`/`minConfidence` shown above are the defaults — call with no second
-argument for the common case. `since` has no default value shown because
-omitting it (the default) means "server picks the request start time" —
-see below.
+`timeout`/`minConfidence` shown above are the defaults. `since` is not a
+default: omitting it means "server picks the request start time" (see
+below), so pass a cutoff taken before the trigger as shown.
 
 | Method | Options (all optional) | Returns |
 | --- | --- | --- |
@@ -95,9 +112,13 @@ plus the full `.message`. Semantics:
 `MailsocketError` (base) with subclasses:
 
 - `AuthError` — HTTP 401.
-- `NotFound` — HTTP 404.
+- `NotFound` — HTTP 404 (also an unknown, deleted or foreign inbox in `sendTestCode`).
 - `RateLimited` — HTTP 429, carries `.subcode` (`rate_limited`, `too_many_wait_requests`, `wait_capacity`) and `.retryAfter` (seconds).
 - `WaitTimeout` — no matching message within the overall deadline.
+
+`sendTestCode` on a disabled inbox throws the base `MailsocketError` with
+`code: "inbox_disabled"` and `status: 409`. Over its hourly quota it throws
+`RateLimited`; `.retryAfter` says how many seconds until it frees up.
 
 `instanceof` works even if your app ends up with both the ESM and the CommonJS copy
 loaded (e.g. an ESM app using a CJS dependency that also uses the SDK). An error
@@ -129,6 +150,11 @@ consumers with `tsc --noEmit`.
 
 ## Changelog
 
+- **0.3.0** — new `sendTestCode(inboxId)` (`POST /inboxes/{id}/test-code`):
+  puts one sample OTP email into your own inbox without going through the
+  mail server, and resolves with `{ message_id, sent_at }` (type
+  `TestCodeResult`). README samples now take `const started = Date.now() / 1000`
+  before the trigger and pass `{ since: started }`.
 - **0.2.0** — BEHAVIOUR CHANGE: `waitForOtp`/`waitForLink`/`wait` now omit
   `since` by default instead of sending `since: 0` ("any message already in
   the inbox"). The old default silently returned a STALE OTP/link from a

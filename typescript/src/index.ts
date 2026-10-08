@@ -22,4 +22,5 @@ export type {
   ListMessagesOptions,
   WaitOptions,
   ClientOptions,
+  TestCodeResult,
 } from "./types.js";

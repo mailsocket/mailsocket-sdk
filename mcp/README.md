@@ -17,6 +17,7 @@ no second HTTP client, no re-implemented polling.
 | `list_inboxes(limit?, cursor?)` | one page of inboxes owned by the key (server default page size 25) + `next_cursor`/`has_more` |
 | `list_messages(inbox_id, has_otp?, subject_contains?, sender?, limit?, cursor?)` | one page of messages, optionally filtered (server default page size 25) + `next_cursor`/`has_more` |
 | `get_latest(inbox_id)` | the newest message, without blocking |
+| `send_test_code(inbox_id)` | puts one sample OTP email straight into the inbox (no mail server) and returns its `message_id` + `sent_at`, so you can check the wait loop without real email. 5 per inbox / 20 per account per hour. |
 | `delete_inbox(inbox_id)` | remove an inbox when done |
 
 Errors from the SDK (`AuthError` / `NotFound` / `RateLimited` / `WaitTimeout`)
@@ -37,6 +38,15 @@ the new email (ISO8601 or unix seconds), or the `id` of the last message you
 saw (`msg_...`, meaning "only messages after that one") — both tools return
 `id`/`received_at` on the matched message so you can chain `since=<id>` into
 the next call on that same inbox.
+
+### Trying the loop without real email
+
+`send_test_code` does not go through the mail server, so the code is
+already in the inbox when the tool returns. Take a cutoff first: the `id`
+from `get_latest` (or `since=0` if the inbox is empty), or the current time.
+Then call `send_test_code(inbox_id)`, then
+`wait_for_otp(inbox_id, since=<that cutoff>)`. Without `since` the wait only
+sees mail that arrives during the wait, so it would miss the test code.
 
 ## Requirements
 
@@ -171,12 +181,20 @@ remote-transport tests talk to a local fake upstream on `127.0.0.1`.
 
 ## Changelog
 
+- **0.4.0** — new `send_test_code(inbox_id)` tool (stdio and the hosted
+  remote server, under the same per-key caps as the other non-wait tools):
+  puts one sample OTP email into your own inbox without going through the
+  mail server. Requires `mailsocket>=0.3.0` (`Client.send_test_code`).
 - **0.3.0** — BEHAVIOUR CHANGE (via `mailsocket>=0.2.0`): `wait_for_otp` /
   `wait_for_link` now omit `since` by default instead of forwarding `0`
   ("any message already in the inbox"). The old default could return a
   STALE OTP/link already sitting in a reused inbox; the new default matches
   only messages arriving after the call. Pass `since=0` explicitly to keep
   the old behaviour.
+  Hosted server (mcp.mailsocket.app, deployed from the repo, no new PyPI
+  release): per-key concurrent waits raised 3 → 10 (= the Pro plan cap; the
+  API still enforces each plan's own cap) and the shared wait pool 16 → 32,
+  following the backend's raised wait capacity (global 64).
 - **0.2.3** — `wait_for_otp` / `wait_for_link` accept an optional `since` (ISO8601, unix seconds or a message id) so a reused inbox returns the NEW code; results include the message `id` and `received_at`.
 - **0.2.2** — depends on `mailsocket>=0.1.3` (stricter `_seg` id validation in the underlying Python SDK).
 

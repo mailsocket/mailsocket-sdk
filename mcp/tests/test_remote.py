@@ -81,6 +81,8 @@ class Upstream:
                     )
                 if self.command == "DELETE":
                     return self._send(204, None)
+                if path.endswith("/test-code") and self.command == "POST":
+                    return self._send(201, {"data": {"message_id": f"msg_{tenant}", "sent_at": "2026-10-08T12:00:00Z"}})
                 if path.endswith("/messages/latest"):
                     return self._send(200, {"data": {"id": "msg_1", "subject": f"hello {tenant} {path}"}})
                 if path.endswith("/messages/wait"):
@@ -391,6 +393,7 @@ ALL_TOOL_CALLS = [
     ("list_messages", {"inbox_id": "i"}),
     ("get_latest", {"inbox_id": "i"}),
     ("delete_inbox", {"inbox_id": "i"}),
+    ("send_test_code", {"inbox_id": "i"}),
 ]
 
 
@@ -757,7 +760,7 @@ def test_stateless_no_session_id_needed(upstream):
 
     r1, r2 = run(go)
     assert r1.status_code == 200 and "mcp-session-id" not in r1.headers
-    assert len(r1.json()["result"]["tools"]) == 7
+    assert len(r1.json()["result"]["tools"]) == 8
     assert r2.status_code == 200 and r2.json()["result"]["isError"] is False
     assert "tenant-B" in r2.json()["result"]["content"][0]["text"]
 
@@ -828,6 +831,12 @@ class FakeClient:
 
         return R()
 
+    def send_test_code(self, inbox_id):
+        self.calls.append(("send_test_code", inbox_id))
+        if FakeClient.block_keys is not None and self.key in FakeClient.block_keys:
+            self._block()
+        return {"message_id": "msg_t", "sent_at": "2026-10-08T12:00:00Z"}
+
     def list_inboxes(self, limit=None, cursor=None):
         if FakeClient.block_keys is not None and self.key in FakeClient.block_keys:
             self._block()
@@ -874,9 +883,14 @@ def test_wait_capacity_429_is_clean_error_with_retry_hint(upstream, fake_client_
     assert "Traceback" not in text
 
 
-def test_limiter_caps_waits_at_16_and_other_tools_still_served(upstream, fake_client_cls, monkeypatch):
-    """20 concurrent waits: at most 16 in flight, the rest get a clean busy
-    error after the queue timeout, and list_inboxes is served meanwhile."""
+def test_limiter_caps_waits_at_wait_concurrency_and_other_tools_still_served(
+    upstream, fake_client_cls, monkeypatch
+):
+    """WAIT_CONCURRENCY + 4 concurrent waits: at most WAIT_CONCURRENCY in
+    flight, the 4 extra get a clean busy error after the queue timeout, and
+    list_inboxes is served meanwhile."""
+    cap = srv.WAIT_CONCURRENCY
+    excess = 4
     monkeypatch.setattr(srv, "LIMITER_QUEUE_TIMEOUT", 0.5)
     fake_client_cls.gate = threading.Event()
     app = make_app(upstream)
@@ -896,42 +910,58 @@ def test_limiter_caps_waits_at_16_and_other_tools_still_served(upstream, fake_cl
                 waits.append(r.json()["result"])
 
             async with anyio.create_task_group() as tg:
-                for i in range(20):
+                for i in range(cap + excess):
                     tg.start_soon(wait_one, i)
                 # Let the waits saturate their pool, then prove "other" is free.
                 with anyio.fail_after(5):
-                    while FakeClient.inflight < 16:
+                    while FakeClient.inflight < cap:
                         await anyio.sleep(0.01)
                 other = await client.post(
                     "/mcp", headers=bearer(KEY_A), json=tool_call("list_inboxes", {}, id_=99)
                 )
                 other_inflight = FakeClient.inflight
-                # Wait until the 4 excess callers have been refused, then release.
+                # Wait until the excess callers have been refused, then release.
                 with anyio.fail_after(5):
-                    while len(waits) < 4:
+                    while len(waits) < excess:
                         await anyio.sleep(0.01)
                 FakeClient.gate.set()
         return waits, other, other_inflight
 
     waits, other, other_inflight = run(go)
-    assert FakeClient.max_inflight == 16
+    assert FakeClient.max_inflight == cap
     assert other.json()["result"]["isError"] is False
-    assert other_inflight == 16  # served while all 16 wait slots were busy
+    assert other_inflight == cap  # served while every wait slot was busy
     busy = [w for w in waits if w["isError"]]
     ok = [w for w in waits if not w["isError"]]
-    assert len(busy) == 4 and len(ok) == 16
+    assert len(busy) == excess and len(ok) == cap
     assert all("Retry in a few seconds" in w["content"][0]["text"] for w in busy)
+
+
+@pytest.mark.parametrize("path", ["docker-compose.yml", "deploy/mcp/Dockerfile"])
+def test_uvicorn_limit_concurrency_covers_both_pools(path):
+    """uvicorn answers 503 above --limit-concurrency before our limiters ever
+    see the request, so it must admit every wait + other slot (and the wait
+    pool must stay below the backend's global 64 so MCP alone cannot fill it)."""
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[3] / path).read_text()
+    m = re.search(r'"--limit-concurrency",\s*"(\d+)"', text)
+    assert m, path
+    assert int(m.group(1)) >= srv.WAIT_CONCURRENCY + srv.OTHER_CONCURRENCY
+    assert srv.WAIT_CONCURRENCY < 64
 
 
 # -- per-key fairness (opus P2-1) --------------------------------------------
 
 
 def test_p2_one_key_cannot_starve_another_real_upstream_429(upstream, monkeypatch):
-    """opus's exact scenario on the REAL SDK + wire: 16 concurrent waits from key
-    A against an upstream answering 429 too_many_wait_requests (Retry-After 1).
+    """opus's exact scenario on the REAL SDK + wire: PER_KEY_WAIT_CONCURRENCY + 6
+    concurrent waits from key A against an upstream answering 429 too_many_wait_requests (Retry-After 1).
     Key B's wait must still be served (and reach the upstream) promptly; A's
     calls come back as clean tool errors without sleeping/retrying in a slot."""
     monkeypatch.setattr(srv, "LIMITER_QUEUE_TIMEOUT", 1.5)
+    n_attack = srv.PER_KEY_WAIT_CONCURRENCY + 6
     upstream.wait_429_keys = {KEY_A}
     app = make_app(upstream)
 
@@ -948,7 +978,7 @@ def test_p2_one_key_cannot_starve_another_real_upstream_429(upstream, monkeypatc
                 a_results.append(r.json()["result"])
 
             async with anyio.create_task_group() as tg:
-                for i in range(16):
+                for i in range(n_attack):
                     tg.start_soon(attacker, i)
                 await anyio.sleep(0.05)  # let A's calls grab whatever they can
                 started = time.monotonic()
@@ -970,11 +1000,11 @@ def test_p2_one_key_cannot_starve_another_real_upstream_429(upstream, monkeypatc
     assert len(b_calls) == 1
     # A: every call is a clean, immediate error — either the per-key cap or
     # the upstream 429 surfaced as-is. No Retry-After sleeping inside a slot.
-    assert len(a_results) == 16 and all(r["isError"] for r in a_results)
+    assert len(a_results) == n_attack and all(r["isError"] for r in a_results)
     texts = [r["content"][0]["text"] for r in a_results]
     capped = [t for t in texts if "Too many concurrent wait calls for this API key" in t]
     limited = [t for t in texts if t.startswith("Rate limited (HTTP 429)")]
-    assert len(capped) + len(limited) == 16
+    assert len(capped) + len(limited) == n_attack
     assert len(limited) <= srv.PER_KEY_WAIT_CONCURRENCY
     a_calls = [c for c in upstream.calls if c["headers"]["authorization"] == f"Bearer {KEY_A}"]
     assert len(a_calls) == len(limited)  # exactly one upstream hit each, no retries
@@ -982,9 +1012,11 @@ def test_p2_one_key_cannot_starve_another_real_upstream_429(upstream, monkeypatc
     assert srv._PerKeyInflight.counts == {}  # entries removed at 0
 
 
-def test_p2_per_key_wait_cap_is_3_and_other_key_still_served(upstream, fake_client_cls):
-    """Per-key cap alone: A's 16 waits → only 3 in flight, 13 immediate clean
-    errors; B's wait is served while A's 3 are still held."""
+def test_p2_per_key_wait_cap_and_other_key_still_served(upstream, fake_client_cls):
+    """Per-key cap alone: A's cap + 6 waits → only PER_KEY_WAIT_CONCURRENCY in
+    flight, 6 immediate clean errors; B's wait is served while A's are held."""
+    cap = srv.PER_KEY_WAIT_CONCURRENCY
+    n = cap + 6
     fake_client_cls.gate = threading.Event()
     fake_client_cls.block_keys = {KEY_A}
     app = make_app(upstream)
@@ -1001,10 +1033,10 @@ def test_p2_per_key_wait_cap_is_3_and_other_key_still_served(upstream, fake_clie
                 results.append(r.json()["result"])
 
             async with anyio.create_task_group() as tg:
-                for i in range(16):
+                for i in range(n):
                     tg.start_soon(a, i)
                 with anyio.fail_after(5):
-                    while len(results) < 13 or FakeClient.inflight < 3:
+                    while len(results) < n - cap or FakeClient.inflight < cap:
                         await anyio.sleep(0.01)
                 held = FakeClient.inflight
                 counts_while_held = dict(srv._PerKeyInflight.counts)
@@ -1016,10 +1048,10 @@ def test_p2_per_key_wait_cap_is_3_and_other_key_still_served(upstream, fake_clie
         return results, b.json()["result"], held, counts_while_held
 
     results, b, held, counts = run(go)
-    assert held == 3 and FakeClient.max_inflight == 3
+    assert held == cap and FakeClient.max_inflight == cap
     busy = [r for r in results if r["isError"]]
-    assert len(busy) == 13 and len(results) == 16
-    assert all("max 3 in flight" in r["content"][0]["text"] for r in busy)
+    assert len(busy) == n - cap and len(results) == n
+    assert all(f"max {cap} in flight" in r["content"][0]["text"] for r in busy)
     assert b["isError"] is False
     # keyed by sha256 digest, never by the key itself
     assert all(KEY_A not in k[0] and len(k[0]) == 64 for k in counts)
@@ -1060,6 +1092,59 @@ def test_p2_per_key_other_cap_is_8(upstream, fake_client_cls):
     assert srv._PerKeyInflight.counts == {}
 
 
+def test_send_test_code_reaches_upstream_as_tenant_post(upstream):
+    """Remote: the tool POSTs /inboxes/{id}/test-code upstream with the
+    CALLER's key and returns that tenant's result."""
+    app = make_app(upstream)
+    r = _post(app, json=tool_call("send_test_code", {"inbox_id": "inbox_x"}))
+    result = r.json()["result"]
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"]) == {
+        "message_id": "msg_tenant-A",
+        "sent_at": "2026-10-08T12:00:00Z",
+    }
+    assert [(c["method"], c["path"]) for c in upstream.calls] == [("POST", "/api/v1/inboxes/inbox_x/test-code")]
+    assert upstream.calls[0]["headers"]["authorization"] == f"Bearer {KEY_A}"
+
+
+def test_send_test_code_shares_the_per_key_non_wait_cap(upstream, fake_client_cls):
+    """send_test_code is a non-wait tool: the per-key cap of 8 in-flight
+    non-wait calls applies to it, and another key is still served."""
+    fake_client_cls.gate = threading.Event()
+    fake_client_cls.block_keys = {KEY_A}
+    app = make_app(upstream)
+
+    async def go():
+        results = []
+        async with serving(app) as client:
+
+            async def a(i):
+                r = await client.post(
+                    "/mcp", headers=bearer(KEY_A), json=tool_call("send_test_code", {"inbox_id": "i"}, id_=i)
+                )
+                results.append(r.json()["result"])
+
+            async with anyio.create_task_group() as tg:
+                for i in range(12):
+                    tg.start_soon(a, i)
+                with anyio.fail_after(5):
+                    while len(results) < 4 or FakeClient.inflight < srv.PER_KEY_OTHER_CONCURRENCY:
+                        await anyio.sleep(0.01)
+                b = await client.post(
+                    "/mcp", headers=bearer(KEY_B), json=tool_call("send_test_code", {"inbox_id": "i"})
+                )
+                FakeClient.gate.set()
+        return results, b.json()["result"]
+
+    results, b = run(go)
+    assert FakeClient.max_inflight == srv.PER_KEY_OTHER_CONCURRENCY
+    busy = [r for r in results if r["isError"]]
+    assert len(busy) == 12 - srv.PER_KEY_OTHER_CONCURRENCY
+    assert all("non-wait calls for this API key (max 8" in r["content"][0]["text"] for r in busy)
+    assert b["isError"] is False
+    assert srv._PerKeyInflight.counts == {}
+
+
 def test_p2_remote_wait_429_returns_immediately_no_sleep(upstream, monkeypatch):
     """Remote mode: an upstream 429 on a wait is surfaced at once (one upstream
     hit), never slept on inside the slot."""
@@ -1085,7 +1170,7 @@ def test_p2_per_key_counter_released_on_error(upstream, fake_client_cls):
     async def go():
         texts = []
         async with serving(app) as client:
-            for i in range(5):  # would hit the cap of 3 if slots leaked
+            for i in range(srv.PER_KEY_WAIT_CONCURRENCY + 2):  # would hit the cap if slots leaked
                 r = await client.post(
                     "/mcp", headers=bearer(KEY_A),
                     json=tool_call("wait_for_otp", {"inbox_id": "i"}, id_=i),
@@ -1094,7 +1179,7 @@ def test_p2_per_key_counter_released_on_error(upstream, fake_client_cls):
         return texts
 
     texts = run(go)
-    assert len(texts) == 5
+    assert len(texts) == srv.PER_KEY_WAIT_CONCURRENCY + 2
     assert all("Too many concurrent" not in t for t in texts)
     assert all(t == "boom" for t in texts)
     assert srv._PerKeyInflight.counts == {}
@@ -1113,6 +1198,8 @@ def test_stdio_binding_has_no_per_key_cap_and_sdk_still_retries():
         inflight = 0
         peak = 0
 
+    n = srv.PER_KEY_WAIT_CONCURRENCY + 3
+
     async def go():
         ev = anyio.Event()
 
@@ -1126,12 +1213,13 @@ def test_stdio_binding_has_no_per_key_cap_and_sdk_still_retries():
 
         with srv.bind_client(object(), KEY_A):
             async with anyio.create_task_group() as tg:
-                for _ in range(6):
+                for _ in range(n):
                     tg.start_soon(body)
                 with anyio.fail_after(5):
-                    while Gate.inflight < 6:
+                    while Gate.inflight < n:
                         await anyio.sleep(0.01)
                 ev.set()
 
     run(go)
-    assert Gate.peak == 6  # > per-key cap of 3: stdio is single-tenant, uncapped
+    # > the remote per-key wait cap: stdio is single-tenant, uncapped
+    assert Gate.peak == n > srv.PER_KEY_WAIT_CONCURRENCY

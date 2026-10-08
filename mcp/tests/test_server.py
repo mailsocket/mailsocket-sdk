@@ -56,6 +56,8 @@ class FakeClient:
         self.deleted = []
         self.wait_otp = None  # (result | exception) scripted per-test
         self.wait_link = None
+        self.test_code_calls = []
+        self.test_code = {"message_id": "msg_test1", "sent_at": "2026-10-08T12:00:00Z"}
 
     def create_inbox(self, label=None):
         self.created.append(label)
@@ -96,6 +98,12 @@ class FakeClient:
         self.deleted.append(inbox_id)
         return None
 
+    def send_test_code(self, inbox_id):
+        self.test_code_calls.append(inbox_id)
+        if isinstance(self.test_code, Exception):
+            raise self.test_code
+        return self.test_code
+
 
 class SimplePage:
     def __init__(self, data):
@@ -132,6 +140,7 @@ def test_tools_list_returns_all_tools_with_valid_schemas():
         "list_messages",
         "get_latest",
         "delete_inbox",
+        "send_test_code",
     }
     by_name = {t.name: t for t in tools}
     for name, tool in by_name.items():
@@ -211,6 +220,12 @@ def test_tools_list_annotation_values():
             "readOnlyHint": None,
             "destructiveHint": True,
             "idempotentHint": None,
+            "openWorldHint": True,
+        },
+        "send_test_code": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
             "openWorldHint": True,
         },
     }
@@ -386,6 +401,68 @@ def test_get_latest_and_delete_inbox(fake_client):
     assert fake_client.deleted == ["inbox_abc"]
 
 
+# -- send_test_code ----------------------------------------------------------
+
+
+def test_send_test_code_returns_message_id_and_sent_at(fake_client):
+    result = call_tool("send_test_code", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is False
+    payload = json.loads(result.content[0].text)
+    assert payload == {"message_id": "msg_test1", "sent_at": "2026-10-08T12:00:00Z"}
+    assert fake_client.test_code_calls == ["inbox_abc"]
+
+
+def test_send_test_code_description_explains_pairing_with_wait():
+    tools = {t.name: t for t in asyncio.run(server.list_tools())}
+    desc = tools["send_test_code"].description
+    assert "does NOT go through the mail server" in desc
+    assert "since" in desc and "wait_for_otp" in desc
+    assert "BEFORE calling this tool" in desc
+    schema = tools["send_test_code"].input_schema
+    assert set(schema["properties"]) == {"inbox_id"}
+    assert schema.get("required") == ["inbox_id"]
+
+
+@pytest.mark.parametrize(
+    "exc, expected_substring",
+    [
+        (NotFound("Resource not found.", code="not_found", status=404), "Not found (HTTP 404)"),
+        (
+            RateLimited("Too many test codes. Try again at 13:00 UTC.", code="rate_limited", retry_after=1800.0),
+            "Retry after 1800s",
+        ),
+        (
+            MailsocketError(
+                "This inbox is disabled. Enable it to receive a test code.", code="inbox_disabled", status=409
+            ),
+            "This inbox is disabled",
+        ),
+        (AuthError("Authentication required.", code="authentication_required"), "Authentication failed"),
+    ],
+)
+def test_send_test_code_errors_are_clean_tool_errors(fake_client, exc, expected_substring):
+    fake_client.test_code = exc
+
+    result = call_tool("send_test_code", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is True
+    text = result.content[0].text
+    assert expected_substring in text
+    assert "Traceback" not in text
+
+
+def test_send_test_code_error_never_leaks_the_key(fake_client):
+    fake_client.test_code = MailsocketError(f"boom for {API_KEY} and ms_live_otherkey123")
+
+    result = call_tool("send_test_code", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is True
+    text = result.content[0].text
+    assert API_KEY not in text and "ms_live_" not in text
+    assert "***" in text
+
+
 # -- error mapping -----------------------------------------------------------
 
 
@@ -439,14 +516,14 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """Versions match everywhere: MCP 0.3.0 (pyproject, server.json, __version__)
-    and its Python SDK sibling 0.2.0 (pyproject, __version__, user agent)."""
+    """Versions match everywhere: MCP 0.4.0 (pyproject, server.json, __version__)
+    and its Python SDK sibling 0.3.0 (pyproject, __version__, user agent)."""
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.3.0"
-    expected_sdk = "0.2.0"
+    expected = "0.4.0"
+    expected_sdk = "0.3.0"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected

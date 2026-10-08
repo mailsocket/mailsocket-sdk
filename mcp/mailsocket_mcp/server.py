@@ -52,7 +52,7 @@ __all__ = [
 # Canonical version, re-exported as ``mailsocket_mcp.__version__`` (see
 # __init__.py). Defined here, not in __init__.py, because __init__.py imports
 # this module at package-load time and a circular self-import would break.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # The headline wait is bounded: an agent can request up to the transport's
 # ceiling as the overall deadline (clamped), though transport overhead can push
@@ -66,16 +66,23 @@ MIN_WAIT_TIMEOUT = 1.0
 
 # Bounded worker-thread concurrency for the (sync, urllib) SDK calls. Waits and
 # everything else get SEPARATE pools so long waits can never starve
-# list/create calls. WAIT matches the backend's global WaitCapacity (16). A
+# list/create calls. WAIT is half the backend's global WaitCapacity (64): the
+# hosted MCP is ONE client of that pool, so it must stay below it and can
+# never fill the backend's wait slots on its own (direct API callers keep the
+# other half). WAIT + OTHER (48) must stay <= uvicorn --limit-concurrency (64)
+# in docker-compose.yml / deploy/mcp/Dockerfile — pinned by test_remote. A
 # caller that cannot get a slot within LIMITER_QUEUE_TIMEOUT gets a clean
 # "busy, retry" tool error instead of queueing unboundedly.
-WAIT_CONCURRENCY = 16
+WAIT_CONCURRENCY = 32
 OTHER_CONCURRENCY = 16
 LIMITER_QUEUE_TIMEOUT = 10.0
 # Per-key fairness (remote mode only): one key may hold at most this many
 # in-flight calls of each kind, so it can never monopolise the shared pools
-# above. Over the cap → an immediate clean tool error (no queueing).
-PER_KEY_WAIT_CONCURRENCY = 3
+# above. Over the cap → an immediate clean tool error (no queueing). The wait
+# cap equals the Pro plan's backend cap (10) so the hosted MCP never limits a
+# paying key below its plan; the backend still enforces each plan's own cap
+# (Free 2, Pro 10, ...) and answers 429 too_many_wait_requests above it.
+PER_KEY_WAIT_CONCURRENCY = 10
 PER_KEY_OTHER_CONCURRENCY = 8
 
 MISSING_KEY_MESSAGE = (
@@ -277,7 +284,7 @@ def _error_result(exc: BaseException) -> types.CallToolResult:
         msg = f"Not found (HTTP 404): {_safe(str(exc), key)}"
     elif isinstance(exc, RateLimited):
         retry = f" Retry after {exc.retry_after:g}s." if exc.retry_after else ""
-        msg = f"Rate limited (HTTP 429): {_safe(str(exc), key)}.{retry}"
+        msg = f"Rate limited (HTTP 429): {_safe(str(exc), key).rstrip('.')}.{retry}"
     elif isinstance(exc, _Busy):
         msg = str(exc)
     elif isinstance(exc, MailsocketError):
@@ -652,6 +659,46 @@ def get_latest(inbox_id: str) -> dict:
     API (``openWorldHint``).
     """
     return _get_client().get_latest(inbox_id)
+
+
+@server.tool(
+    annotations=types.ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+@_guarded()
+def send_test_code(inbox_id: str) -> dict:
+    """Put one sample OTP email (a random 6-digit code) into ``inbox_id``.
+
+    Use this to check the wait loop end to end when you have no real email
+    to trigger. It does NOT go through the mail server: the message is
+    stored and parsed exactly like real inbound mail, so ``wait_for_otp``
+    returns it.
+
+    How to pair it with the wait (one call at a time, no concurrency):
+    BEFORE calling this tool, take a cutoff, either the ``id`` of the newest
+    message (``get_latest``; use ``since=0`` if the inbox is empty) or the
+    current time (ISO8601 or unix seconds). Then call ``send_test_code``,
+    then ``wait_for_otp(inbox_id, since=<that cutoff>)``. Without ``since``,
+    the wait only matches mail arriving during the wait itself and would
+    miss this code. Do not pass the returned ``message_id`` as ``since``:
+    that means "after this message" and skips it.
+
+    Limits: 5 per inbox and 20 per account per hour (shared with the
+    dashboard "Send a test code" button); over that, a clean rate-limit
+    error says when to retry. A disabled inbox, or an unknown/deleted/
+    foreign inbox id, returns a clean tool error and nothing is charged.
+
+    Side effects: creates one message in the inbox (counts toward monthly
+    message usage and fires the inbox's webhook, like real mail). Makes one
+    network call to the mailsocket API (``openWorldHint``). Returns
+    ``message_id`` and ``sent_at`` of the new message.
+    """
+    data = _get_client().send_test_code(inbox_id)
+    return {"message_id": data.get("message_id"), "sent_at": data.get("sent_at")}
 
 
 @server.tool(

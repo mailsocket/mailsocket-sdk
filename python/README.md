@@ -4,15 +4,32 @@ The official Python client for the [mailsocket](https://mailsocket.app) v1 REST 
 Ephemeral email inboxes, message retrieval, and — the whole point — **wait for the OTP in one line**.
 
 ```python
+import time
+
 from mailsocket import Client
 
 client = Client("ms_live_...")            # your API key from the dashboard
 inbox = client.create_inbox(label="signup")  # -> {"id": "inbox_...", "address": "..."}
 
+started = time.time()                         # take the cutoff BEFORE the trigger
 # hand inbox["address"] to whatever form sends the code, then:
-result = client.wait_for_otp(inbox["id"])     # blocks up to 60s
+result = client.wait_for_otp(inbox["id"], since=started)  # blocks up to 60s
 print(result.otp)         # "123456"
 print(result.confidence)  # 0.95
+```
+
+Take `started` just before you trigger the email and pass it as `since`: a
+code that lands before `wait_for_otp` starts is still caught, and an older
+code in a reused inbox is not.
+
+No email handy? `client.send_test_code(inbox_id)` drops a sample code into
+the inbox so you can see the whole loop work:
+
+```python
+started = time.time()
+client.send_test_code(inbox["id"])            # -> {"message_id": "msg_...", "sent_at": "..."}
+result = client.wait_for_otp(inbox["id"], since=started)
+print(result.otp)         # the sample code
 ```
 
 No polling loop. No regex over the email body. `wait_for_otp` long-polls the
@@ -42,6 +59,7 @@ client = Client(api_key, base_url="https://dash.mailsocket.app/api/v1")
 | `list_messages(inbox_id, has_otp=None, subject_contains=None, sender=None, ...)` | `Page` — `sender` maps to the API's `from` filter |
 | `get_latest(inbox_id)` | `dict` — newest message |
 | `get_message(message_id)` | `dict` — full message |
+| `send_test_code(inbox_id)` | `dict` — `message_id`, `sent_at` of a sample OTP email put straight into the inbox (no mail server; 5 per inbox / 20 per account per hour) |
 
 ### The moat
 
@@ -49,6 +67,14 @@ client = Client(api_key, base_url="https://dash.mailsocket.app/api/v1")
 result = client.wait_for_otp("inbox_abc123", timeout=60, min_confidence=0.0, since=None)
 result = client.wait_for_link("inbox_abc123", timeout=60, since=None)
 result = client.wait("inbox_abc123", timeout=60, min_confidence=0.0, since=None)  # otp OR link
+```
+
+With a cutoff taken before the trigger (the usual case):
+
+```python
+started = time.time()
+# trigger the email here
+result = client.wait_for_otp("inbox_abc123", since=started)
 ```
 
 All three return a `WaitResult` and take keyword-only arguments after
@@ -85,10 +111,15 @@ Semantics:
 `MailsocketError` (base) with subclasses:
 
 - `AuthError` — HTTP 401 (bad/missing key).
-- `NotFound` — HTTP 404.
+- `NotFound` — HTTP 404 (also an unknown, deleted or foreign inbox in
+  `send_test_code`).
 - `RateLimited` — HTTP 429, carries `.subcode` (`rate_limited`,
   `too_many_wait_requests`, `wait_capacity`) and `.retry_after`.
 - `WaitTimeout` — no matching message within the overall deadline.
+
+`send_test_code` on a disabled inbox raises the base `MailsocketError` with
+`code="inbox_disabled"` and `status=409`. Over its hourly quota it raises
+`RateLimited`; `.retry_after` says how many seconds until it frees up.
 
 ## Develop
 
@@ -104,6 +135,10 @@ invalid id never reaches the network.
 
 ## Changelog
 
+- **0.3.0** — new `Client.send_test_code(inbox_id)` (`POST /inboxes/{id}/test-code`):
+  puts one sample OTP email into your own inbox without going through the
+  mail server, and returns `{"message_id", "sent_at"}`. README samples now
+  take `started = time.time()` before the trigger and pass `since=started`.
 - **0.2.0** — BEHAVIOUR CHANGE: `wait_for_otp`/`wait_for_link`/`wait` now
   default `since=None`, which omits the param so the server uses the
   request start time, instead of the old `since=0` ("any message already

@@ -11,6 +11,7 @@ test("require() returns MailsocketClient from the CJS build", () => {
     baseUrl: "https://example.test/api/v1",
   });
   assert.ok(client instanceof mod.MailsocketClient);
+  assert.equal(typeof client.sendTestCode, "function");
 });
 
 test("require() also exposes the error classes", () => {

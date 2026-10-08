@@ -14,6 +14,7 @@ import type {
   MessageSummary,
   Page,
   RequireKind,
+  TestCodeResult,
   WaitOptions,
 } from "./types.js";
 
@@ -26,7 +27,7 @@ const WAIT_SOCKET_BUFFER_MS = 10_000;
 /** Default retry delay (ms) when a 429 carries no Retry-After header. */
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 
-const USER_AGENT = "mailsocket-typescript/0.2.0";
+const USER_AGENT = "mailsocket-typescript/0.3.0";
 
 /**
  * Percent-encode a caller-supplied id as ONE path segment (`/`, `?`, `#`,
@@ -130,6 +131,24 @@ export class MailsocketClient {
 
   async getMessage(messageId: string): Promise<Message> {
     const payload = await this.request<Message>("GET", `/messages/${seg(messageId)}`);
+    return payload.data;
+  }
+
+  /**
+   * Put one sample OTP email (a random 6-digit code) into `inboxId`
+   * (`POST /inboxes/{id}/test-code`). Resolves with `{ message_id, sent_at }`.
+   *
+   * The message does NOT go through the mail server: it is stored and parsed
+   * like real inbound mail, so a pending or later wait (with a `since` from
+   * before this call) returns it. Shares the dashboard "Send a test code"
+   * quota (5 per inbox, 20 per account per hour).
+   *
+   * Throws `NotFound` for an unknown, deleted or foreign inbox, `RateLimited`
+   * (with `retryAfter`) over the quota, and `MailsocketError` with
+   * `code: "inbox_disabled"` (HTTP 409) for a disabled inbox.
+   */
+  async sendTestCode(inboxId: string): Promise<TestCodeResult> {
+    const payload = await this.request<TestCodeResult>("POST", `/inboxes/${seg(inboxId)}/test-code`);
     return payload.data;
   }
 

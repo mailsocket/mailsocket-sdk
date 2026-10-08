@@ -69,9 +69,11 @@ test("packed: node16 ESM consumer (.mts, import) type-checks", () => {
   writeFileSync(
     join(work, "esm-consumer.mts"),
     [
-      'import { MailsocketClient, MailsocketError, WaitTimeout, type WaitResult } from "mailsocket-sdk";',
+      'import { MailsocketClient, MailsocketError, WaitTimeout, type WaitResult, type TestCodeResult } from "mailsocket-sdk";',
       'const c: MailsocketClient = new MailsocketClient("ms_live_x", { baseUrl: "https://example.test/api/v1" });',
-      "const p: Promise<WaitResult> = c.waitForOtp(\"inbox_1\");",
+      "const p: Promise<WaitResult> = c.waitForOtp(\"inbox_1\", { since: Date.now() / 1000 });",
+      "const t: Promise<TestCodeResult> = c.sendTestCode(\"inbox_1\");",
+      "void t.then((r) => r.message_id.startsWith(\"msg_\") && typeof r.sent_at === \"string\");",
       "void p.catch((e: unknown) => e instanceof WaitTimeout || e instanceof MailsocketError);",
       "",
     ].join("\n"),
@@ -85,7 +87,9 @@ test("packed: node16 CJS consumer (.cts, import = require) type-checks", () => {
     [
       'import sdk = require("mailsocket-sdk");',
       'const c: sdk.MailsocketClient = new sdk.MailsocketClient("ms_live_x", { baseUrl: "https://example.test/api/v1" });',
-      "const p: Promise<sdk.WaitResult> = c.waitForOtp(\"inbox_1\");",
+      "const p: Promise<sdk.WaitResult> = c.waitForOtp(\"inbox_1\", { since: Date.now() / 1000 });",
+      "const t: Promise<sdk.TestCodeResult> = c.sendTestCode(\"inbox_1\");",
+      "void t.then((r) => r.message_id.startsWith(\"msg_\") && typeof r.sent_at === \"string\");",
       "void p.catch((e: unknown) => e instanceof sdk.WaitTimeout || e instanceof sdk.MailsocketError);",
       "export = c;",
       "",

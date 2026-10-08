@@ -308,13 +308,13 @@ test("network failure / socket abort is wrapped as MailsocketError (ocr HIGH)", 
   );
 });
 
-test("metadata consistency: 0.2.0 matches package.json/package-lock/USER_AGENT", async () => {
+test("metadata consistency: 0.3.0 matches package.json/package-lock/USER_AGENT", async () => {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const path = await import("node:path");
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const expected = "0.2.0";
+  const expected = "0.3.0";
 
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(pkg.version, expected);
@@ -325,6 +325,121 @@ test("metadata consistency: 0.2.0 matches package.json/package-lock/USER_AGENT",
 
   const clientSrc = readFileSync(path.join(root, "src", "client.ts"), "utf8");
   assert.match(clientSrc, new RegExp(`mailsocket-typescript/${expected}`));
+});
+
+// -- sendTestCode (POST /inboxes/{id}/test-code) --------------------------
+
+const TEST_CODE_DATA = { message_id: "msg_test1", sent_at: "2026-10-08T12:00:00Z" };
+
+test("sendTestCode POSTs to /inboxes/{id}/test-code with no body and resolves with data", async () => {
+  const calls = installFetch([{ status: 201, body: JSON.stringify({ data: TEST_CODE_DATA }) }]);
+
+  const data = await client().sendTestCode("inbox_abc");
+
+  assert.deepEqual(data, TEST_CODE_DATA);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `${BASE}/inboxes/inbox_abc/test-code`);
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.headers.Authorization, `Bearer ${API_KEY}`);
+});
+
+test("sendTestCode encodes the id as one path segment", async () => {
+  const calls = installFetch([{ status: 201, body: JSON.stringify({ data: TEST_CODE_DATA }) }]);
+
+  await client().sendTestCode("a/b?c");
+
+  assert.equal(calls[0].url, `${BASE}/inboxes/a%2Fb%3Fc/test-code`);
+});
+
+test("sendTestCode 404 (foreign/missing inbox) throws NotFound", async () => {
+  installFetch([
+    { status: 404, body: JSON.stringify({ error: { code: "not_found", message: "Resource not found.", fields: {} } }) },
+  ]);
+
+  await assert.rejects(client().sendTestCode("inbox_foreign"), (err) => {
+    assert.ok(err instanceof NotFound);
+    assert.equal(err.status, 404);
+    return true;
+  });
+});
+
+test("sendTestCode 429 throws RateLimited with retryAfter and does not retry", async () => {
+  const calls = installFetch([
+    {
+      status: 429,
+      headers: { "Retry-After": "1800" },
+      body: JSON.stringify({
+        error: { code: "rate_limited", message: "Too many test codes. Try again at 13:00 UTC.", fields: {} },
+      }),
+    },
+  ]);
+
+  await assert.rejects(client().sendTestCode("inbox_abc"), (err) => {
+    assert.ok(err instanceof RateLimited);
+    assert.equal(err.retryAfter, 1800);
+    assert.equal(err.subcode, "rate_limited");
+    assert.match(err.message, /Try again at/);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+});
+
+test("sendTestCode on a disabled inbox throws MailsocketError code=inbox_disabled status=409", async () => {
+  installFetch([
+    {
+      status: 409,
+      body: JSON.stringify({
+        error: { code: "inbox_disabled", message: "This inbox is disabled. Enable it to receive a test code.", fields: {} },
+      }),
+    },
+  ]);
+
+  await assert.rejects(client().sendTestCode("inbox_abc"), (err) => {
+    assert.ok(err instanceof MailsocketError);
+    assert.ok(!(err instanceof NotFound) && !(err instanceof RateLimited));
+    assert.equal(err.code, "inbox_disabled");
+    assert.equal(err.status, 409);
+    return true;
+  });
+});
+
+test("sendTestCode 401 throws AuthError", async () => {
+  installFetch([
+    { status: 401, body: JSON.stringify({ error: { code: "authentication_required", message: "Auth required.", fields: {} } }) },
+  ]);
+
+  await assert.rejects(client().sendTestCode("inbox_abc"), AuthError);
+});
+
+test("since: started = Date.now() / 1000 is sent as unix seconds", async () => {
+  const calls = installFetch([{ status: 200, body: JSON.stringify({ data: OTP_MESSAGE }) }]);
+  const started = 1_760_000_000.123;
+
+  await client().waitForOtp("inbox_abc", { since: started });
+
+  assert.equal(new URL(calls[0].url).searchParams.get("since"), "1760000000.123");
+});
+
+test("README wait samples take a cutoff before the trigger and pass since", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const readme = readFileSync(path.join(root, "README.md"), "utf8");
+  const samples = readme.split("```ts").slice(1).map((b) => b.split("```")[0]);
+  const waits = samples.filter((s) => /waitFor(Otp|Link)\(|\.wait\(/.test(s));
+  assert.ok(waits.length > 0);
+  for (const sample of waits) {
+    assert.ok(sample.includes("const started = Date.now() / 1000"), sample);
+    for (const line of sample.split("\n")) {
+      if (/waitFor(Otp|Link)\(|\.wait\(/.test(line)) {
+        assert.ok(line.includes("since: started"), line);
+        assert.ok(sample.indexOf("const started") < sample.indexOf(line), line);
+      }
+    }
+  }
+  assert.ok(readme.includes("client.sendTestCode(inbox.id)"));
 });
 
 // -- F1: caller ids are encoded as ONE path segment (parity with Python _seg) --
@@ -504,6 +619,7 @@ for (const id of [".", "..", ""]) {
         () => c.waitForOtp(id),
         () => c.waitForLink(id),
         () => c.wait(id),
+        () => c.sendTestCode(id),
         () => c.waitForOtp(id, { timeout: 0 }), // fails on the id, not WaitTimeout
       ];
       await withRealFetch(async () => {
