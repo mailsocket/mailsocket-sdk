@@ -135,6 +135,12 @@ invalid id never reaches the network.
 
 ## Changelog
 
+- **0.3.1** — the `wait*` helpers no longer miss a message that lands between
+  two long-poll calls. When you pass no `since`, the first call still omits it
+  (the server uses the request start), and every following call sends the
+  cutoff the server reported in the `Mailsocket-Wait-Since` response header of
+  the previous call. With an older server that sends no such header, behaviour
+  is unchanged. An explicit `since` is used as before on every call.
 - **0.3.0** — new `Client.send_test_code(inbox_id)` (`POST /inboxes/{id}/test-code`):
   puts one sample OTP email into your own inbox without going through the
   mail server, and returns `{"message_id", "sent_at"}`. README samples now

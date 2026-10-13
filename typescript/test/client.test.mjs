@@ -120,6 +120,58 @@ test("waitForOtp keeps polling through 204s then returns", async () => {
   }
 });
 
+// -- 0.3.1: wait cursor from Mailsocket-Wait-Since ---------------------------
+
+const CURSOR_1 = "2026-10-12T03:04:05.123456Z";
+const CURSOR_2 = "2026-10-12T03:04:30.654321Z";
+const H = "Mailsocket-Wait-Since";
+
+const sinceOf = (url) => new URL(url).searchParams.get("since");
+
+// [label, method, options, per-call response headers (last = the 200), expected since per call]
+const CURSOR_CASES = [
+  ["otp: iteration 2 sends the header of the 204", "waitForOtp", {}, [{ [H]: CURSOR_1 }, { [H]: CURSOR_1 }, {}], [null, CURSOR_1, CURSOR_1]],
+  ["link: iteration 2 sends the header", "waitForLink", {}, [{ [H]: CURSOR_1 }, {}], [null, CURSOR_1]],
+  ["any: iteration 2 sends the header", "wait", {}, [{ [H]: CURSOR_1 }, {}], [null, CURSOR_1]],
+  ["follows the latest header value", "waitForOtp", {}, [{ [H]: CURSOR_1 }, { [H]: CURSOR_2 }, {}], [null, CURSOR_1, CURSOR_2]],
+  ["old server (no / empty header) keeps omitting since", "waitForOtp", {}, [{}, { [H]: "" }, {}], [null, null, null]],
+  ["explicit since is never replaced", "waitForOtp", { since: "msg_anchor" }, [{ [H]: CURSOR_1 }, {}], ["msg_anchor", "msg_anchor"]],
+  ["explicit since: 0 is kept", "waitForOtp", { since: 0 }, [{ [H]: CURSOR_1 }, {}], ["0", "0"]],
+];
+
+for (const [label, method, options, headers, expected] of CURSOR_CASES) {
+  test(`wait cursor: ${label}`, async () => {
+    const final = method === "waitForLink" ? LINK_MESSAGE : OTP_MESSAGE;
+    const calls = installFetch([
+      ...headers.slice(0, -1).map((h) => ({ status: 204, headers: h })),
+      { status: 200, headers: headers.at(-1), body: JSON.stringify({ data: final }) },
+    ]);
+
+    await client()[method]("inbox_abc", options);
+
+    assert.deepEqual(calls.map((c) => sinceOf(c.url)), expected);
+  });
+}
+
+test("wait cursor survives a 429 retry and is not shared between two waits", async () => {
+  const calls = installFetch([
+    { status: 204, headers: { [H]: CURSOR_1 } },
+    {
+      status: 429,
+      headers: { "Retry-After": "0" },
+      body: JSON.stringify({ error: { code: "wait_capacity", message: "busy", fields: {} } }),
+    },
+    { status: 200, body: JSON.stringify({ data: OTP_MESSAGE }) },
+    { status: 200, body: JSON.stringify({ data: OTP_MESSAGE }) },
+  ]);
+
+  const c = client();
+  await c.waitForOtp("inbox_abc");
+  await c.waitForOtp("inbox_abc");
+
+  assert.deepEqual(calls.map((x) => sinceOf(x.url)), [null, CURSOR_1, CURSOR_1, null]);
+});
+
 test("waitForOtp respects overall timeout -> WaitTimeout", async () => {
   // A 204 means "the server blocked for `timeout` ms and found nothing".
   // Model that with an injectable clock: each 204 advances time by the
@@ -308,13 +360,13 @@ test("network failure / socket abort is wrapped as MailsocketError (ocr HIGH)", 
   );
 });
 
-test("metadata consistency: 0.3.0 matches package.json/package-lock/USER_AGENT", async () => {
+test("metadata consistency: 0.3.1 matches package.json/package-lock/USER_AGENT", async () => {
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const path = await import("node:path");
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const expected = "0.3.0";
+  const expected = "0.3.1";
 
   const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(pkg.version, expected);

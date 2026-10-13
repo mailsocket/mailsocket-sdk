@@ -150,6 +150,11 @@ consumers with `tsc --noEmit`.
 
 ## Changelog
 
+- **0.3.1** — fix: a code arriving between two internal long-poll calls of
+  `waitForOtp`/`waitForLink`/`wait` was missed. Without `options.since`, call 1
+  still omits it; each later call sends the previous response's
+  `Mailsocket-Wait-Since` header as `since`. No header (older server): same as
+  0.3.0. An explicit `since` is unchanged.
 - **0.3.0** — new `sendTestCode(inboxId)` (`POST /inboxes/{id}/test-code`):
   puts one sample OTP email into your own inbox without going through the
   mail server, and resolves with `{ message_id, sent_at }` (type

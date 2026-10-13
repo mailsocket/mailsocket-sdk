@@ -27,7 +27,9 @@ const WAIT_SOCKET_BUFFER_MS = 10_000;
 /** Default retry delay (ms) when a 429 carries no Retry-After header. */
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 
-const USER_AGENT = "mailsocket-typescript/0.3.0";
+const USER_AGENT = "mailsocket-typescript/0.3.1";
+/** Response header with the cutoff a wait call actually used. */
+const WAIT_SINCE_HEADER = "mailsocket-wait-since";
 
 /**
  * Percent-encode a caller-supplied id as ONE path segment (`/`, `?`, `#`,
@@ -181,6 +183,13 @@ export class MailsocketClient {
     const path = `/inboxes/${seg(inboxId)}/messages/wait`;
     const timeoutMs = options.timeout ?? 60_000;
     const deadline = this.now() + timeoutMs;
+    // No caller `since`: the first call omits it (server default = the
+    // request start), and every later call sends back the cutoff the previous
+    // response reported, so a message that lands between two calls is still
+    // matched. An older server sends no header; then each call keeps omitting
+    // `since` exactly as before.
+    let cursor: string | undefined =
+      options.since !== undefined ? String(options.since) : undefined;
 
     for (;;) {
       const remainingMs = deadline - this.now();
@@ -201,8 +210,8 @@ export class MailsocketClient {
       // time: a code that arrives during this call is matched, a stale one
       // already sitting in a reused inbox is not. Pass since=0 explicitly to
       // restore the old behaviour (match anything already in the inbox).
-      if (options.since !== undefined) {
-        params["since"] = String(options.since);
+      if (cursor !== undefined) {
+        params["since"] = cursor;
       }
       if (require !== "link" && options.minConfidence !== undefined) {
         params["min_confidence"] = String(options.minConfidence);
@@ -222,6 +231,9 @@ export class MailsocketClient {
         return this.toWaitResult((envelope as { data: Message }).data);
       }
       if (status === 204) {
+        // Caller's own since wins; else the server-reported cutoff of this
+        // call; else unchanged (an older server sends no header).
+        if (options.since === undefined) cursor = headers.get(WAIT_SINCE_HEADER) || cursor;
         continue; // the server already blocked; re-call immediately
       }
       if (status === 429) {

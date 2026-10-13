@@ -86,7 +86,9 @@ export interface WaitOptions {
   minConfidence?: number;
   /** Only messages strictly after this point match. Default: omitted, so the
    * server uses the request start time (nothing already in the inbox
-   * matches). Pass 0 to match messages already in the inbox. */
+   * matches); later calls in the same wait send the cutoff the server
+   * reported (`Mailsocket-Wait-Since`), so nothing landing between calls is
+   * missed. Pass 0 to match messages already in the inbox. */
   since?: string | number;
 }
 

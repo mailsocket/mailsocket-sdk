@@ -255,6 +255,54 @@ def test_wait_for_otp_returns_otp_and_confidence(fake_client):
     assert since is None  # absent -> SDK omits since (server uses request start time)
 
 
+def test_wait_for_otp_tool_with_real_sdk_sends_server_cursor_on_iteration_2(monkeypatch):
+    """0.4.1: the tool runs the real SDK wait loop (mailsocket>=0.3.1). With
+    no ``since`` the first HTTP call omits it and the second sends the
+    Mailsocket-Wait-Since value from the first 204, so a code landing
+    between the SDK's internal calls is not missed."""
+    import urllib.parse
+
+    from mailsocket import Client
+
+    cursor = "2026-10-12T03:04:05.123456Z"
+    scripted = [
+        (204, {"Mailsocket-Wait-Since": cursor}, b""),
+        (200, {}, json.dumps({"data": OTP_MESSAGE}).encode()),
+    ]
+    urls = []
+
+    class _Resp:
+        def __init__(self, status, headers, body):
+            self.status, self.headers, self._body = status, headers, body
+
+        def getcode(self):
+            return self.status
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        urls.append(request.full_url)
+        return _Resp(*scripted.pop(0))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = Client(API_KEY, base_url="https://example.test/api/v1")
+
+    with bind_client(client, API_KEY, max_wait_timeout=MAX_WAIT_TIMEOUT):
+        result = call_tool("wait_for_otp", {"inbox_id": "inbox_abc"})
+
+    assert result.is_error is False
+    assert '"123456"' in result.content[0].text
+    since = [urllib.parse.parse_qs(urllib.parse.urlsplit(u).query).get("since") for u in urls]
+    assert since == [None, [cursor]]
+
+
 def test_wait_for_otp_timeout_is_clamped(fake_client):
     fake_client.wait_otp = FakeWaitResult(otp="123456")
 
@@ -516,14 +564,14 @@ def test_version_exported():
 
 
 def test_metadata_consistency_across_files():
-    """Versions match everywhere: MCP 0.4.0 (pyproject, server.json, __version__)
-    and its Python SDK sibling 0.3.0 (pyproject, __version__, user agent)."""
+    """Versions match everywhere: MCP 0.4.1 (pyproject, server.json, __version__)
+    and its Python SDK sibling 0.3.1 (pyproject, __version__, user agent)."""
     import tomllib
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.4.0"
-    expected_sdk = "0.3.0"
+    expected = "0.4.1"
+    expected_sdk = "0.3.1"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected

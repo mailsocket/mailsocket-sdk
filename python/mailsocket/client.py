@@ -18,6 +18,8 @@ DEFAULT_BASE_URL = "https://dash.mailsocket.app/api/v1"
 WAIT_TIMEOUT_MAX = 25  # seconds — the server clamps the per-call wait to [1, 25]
 WAIT_SOCKET_BUFFER = 10  # seconds of client-side slack above the server block
 DEFAULT_RETRY_AFTER = 1.0  # seconds, when a 429 carries no Retry-After header
+# Response header with the cutoff a wait call actually used (server >= 2026-10).
+WAIT_SINCE_HEADER = "mailsocket-wait-since"
 
 __all__ = ["Client", "Page", "WaitResult"]
 
@@ -289,6 +291,12 @@ class Client:
         since,
     ) -> WaitResult:
         deadline = _monotonic() + float(timeout)
+        # No caller ``since``: the first call omits it (server default = the
+        # request start), and every later call sends back the cutoff the
+        # previous response reported, so a message that lands between two
+        # calls is still matched. An older server sends no header; then each
+        # call keeps omitting ``since`` exactly as before.
+        cursor = since
         while True:
             remaining = deadline - _monotonic()
             if remaining <= 0:
@@ -297,8 +305,8 @@ class Client:
                 )
             server_timeout = max(1.0, min(float(WAIT_TIMEOUT_MAX), remaining))
             params = {"timeout": server_timeout, "require": require}
-            if since is not None:
-                params["since"] = since
+            if cursor is not None:
+                params["since"] = cursor
             if min_confidence is not None:
                 params["min_confidence"] = min_confidence
 
@@ -312,6 +320,7 @@ class Client:
             if status == 200:
                 return WaitResult(payload["data"])
             if status == 204:
+                cursor = self._next_cursor(since, cursor, headers)
                 continue
             if status == 429:
                 if not self._retry_wait_on_429:
@@ -326,6 +335,15 @@ class Client:
                 continue
             self._raise_for_status(status, headers, payload)
 
+    @staticmethod
+    def _next_cursor(since, cursor, headers: dict):
+        """The ``since`` for the next wait call: the caller's own value when
+        given, else the server-reported cutoff of this call, else unchanged
+        (an older server sends no header)."""
+        if since is not None:
+            return cursor
+        return headers.get(WAIT_SINCE_HEADER) or cursor
+
     def _request(self, method: str, path: str, *, params: dict | None = None, json_body=None):
         status, headers, body = self._request_http(method, path, params=params, json_body=json_body)
         payload = self._parse_json(body)
@@ -339,7 +357,7 @@ class Client:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         headers = {
             "Accept": "application/json",
-            "User-Agent": "mailsocket-python/0.3.0",
+            "User-Agent": "mailsocket-python/0.3.1",
         }
         headers.update(self._extra_headers)
         # Set last so nothing in extra_headers can ever replace it.

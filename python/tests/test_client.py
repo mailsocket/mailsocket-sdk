@@ -193,6 +193,63 @@ def test_wait_keeps_polling_through_204s_then_returns(monkeypatch):
         assert "require=otp" in url
 
 
+def _since_of(url):
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    return query.get("since", [None])[0]
+
+
+CURSOR_1 = "2026-10-12T03:04:05.123456Z"
+CURSOR_2 = "2026-10-12T03:04:30.654321Z"
+EPOCH = "1970-01-01T00:00:00.000000Z"
+H = "Mailsocket-Wait-Since"
+
+
+@pytest.mark.parametrize(
+    "method, kwargs, headers, expected",
+    [
+        # 0.3.1 gap fix: no caller since -> call 1 omits it, call N sends the
+        # header of call N-1, so a message landing between calls is matched.
+        ("wait_for_otp", {}, [{H: CURSOR_1}, {H: CURSOR_1}, {}], [None, CURSOR_1, CURSOR_1]),
+        ("wait_for_link", {}, [{H: CURSOR_1}, {}], [None, CURSOR_1]),
+        ("wait", {}, [{H: CURSOR_1}, {}], [None, CURSOR_1]),
+        ("wait_for_otp", {}, [{H: CURSOR_1}, {H: CURSOR_2}, {}], [None, CURSOR_1, CURSOR_2]),
+        ("wait_for_otp", {}, [{H.upper(): CURSOR_1}, {}], [None, CURSOR_1]),
+        # Old server (no header) or an empty header: unchanged 0.3.0 behaviour.
+        ("wait_for_otp", {}, [{}, {}, {}], [None, None, None]),
+        ("wait_for_otp", {}, [{H: ""}, {}], [None, None]),
+        # An explicit since is never replaced by the header.
+        ("wait_for_otp", {"since": "msg_anchor"}, [{H: CURSOR_1}, {H: CURSOR_1}, {}], ["msg_anchor"] * 3),
+        ("wait_for_otp", {"since": 0}, [{H: EPOCH}, {}], ["0", "0"]),
+    ],
+)
+def test_wait_loop_cursor(monkeypatch, method, kwargs, headers, expected):
+    final = LINK_MESSAGE if method == "wait_for_link" else OTP_MESSAGE
+    responses = [(204, h, None) for h in headers[:-1]] + [(200, headers[-1], {"data": final})]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+
+    getattr(client, method)("inbox_abc", timeout=60, **kwargs)
+
+    assert [_since_of(url) for _, url in transport.calls] == expected
+
+
+def test_wait_loop_keeps_cursor_across_a_429_retry_and_not_between_waits(monkeypatch):
+    responses = [
+        (204, {H: CURSOR_1}, None),
+        (429, {"Retry-After": "0"}, {"error": {"code": "wait_capacity", "message": "busy"}}),
+        (200, {}, {"data": OTP_MESSAGE}),
+        (200, {}, {"data": OTP_MESSAGE}),
+    ]
+    client, transport = make_client(responses)
+    _monkeypatch_transport(monkeypatch, client, transport)
+    monkeypatch.setattr(mailsocket.client, "_sleep", lambda s: None)
+
+    client.wait_for_otp("inbox_abc", timeout=60)
+    client.wait_for_otp("inbox_abc", timeout=60)  # a new wait starts fresh
+
+    assert [_since_of(url) for _, url in transport.calls] == [None, CURSOR_1, CURSOR_1, None]
+
+
 def test_wait_respects_overall_timeout_raises_wait_timeout(monkeypatch):
     # A 204 means "the server blocked for `timeout` seconds and found nothing".
     # Model that with a controllable clock: each 204 advances time by the
@@ -582,7 +639,7 @@ def test_metadata_consistency_across_files():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    expected = "0.3.0"
+    expected = "0.3.1"
 
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     assert pyproject["project"]["version"] == expected

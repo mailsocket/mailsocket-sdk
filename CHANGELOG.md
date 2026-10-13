@@ -6,6 +6,12 @@ independently; see the per-package sections below.
 
 ## mailsocket (PyPI, Python SDK)
 
+### 0.3.1
+- Wait loops are now gap-free: from the second poll on, the client re-sends the
+  server's `Mailsocket-Wait-Since` cursor as `since`, so a message that lands
+  between two polls can no longer be missed. Servers without the header keep
+  the old behaviour.
+
 ### 0.3.0
 - New `Client.send_test_code(inbox_id)`: puts one sample OTP email (a random
   6-digit code) straight into one of your inboxes, without going through the
@@ -43,6 +49,13 @@ independently; see the per-package sections below.
 
 ## mailsocket-mcp (PyPI, MCP server)
 
+### 0.4.1
+- Wait loops are now gap-free: from the second poll on, the client re-sends the
+  server's `Mailsocket-Wait-Since` cursor as `since`, so a message that lands
+  between two polls can no longer be missed. Servers without the header keep
+  the old behaviour.
+  `wait_for_otp` / `wait_for_link` get this through the SDK.
+
 ### 0.4.0
 - New tool `send_test_code` (stdio and hosted). Requires `mailsocket>=0.3.0`.
 - 429 messages no longer end with a double period.
@@ -76,6 +89,12 @@ independently; see the per-package sections below.
   `get_latest`, `delete_inbox` as MCP tools, wrapping the Python SDK.
 
 ## mailsocket-sdk (npm, TypeScript SDK)
+
+### 0.3.1
+- Wait loops are now gap-free: from the second poll on, the client re-sends the
+  server's `Mailsocket-Wait-Since` cursor as `since`, so a message that lands
+  between two polls can no longer be missed. Servers without the header keep
+  the old behaviour.
 
 ### 0.3.0
 - New `client.sendTestCode(inboxId)` (ESM + CommonJS).

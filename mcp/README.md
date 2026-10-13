@@ -181,6 +181,10 @@ remote-transport tests talk to a local fake upstream on `127.0.0.1`.
 
 ## Changelog
 
+- **0.4.1** — requires `mailsocket>=0.3.1`: `wait_for_otp` / `wait_for_link`
+  called without `since` no longer miss a message that lands between the
+  SDK's internal long-poll calls (each follow-up call sends the cutoff the
+  server reported in `Mailsocket-Wait-Since`). No tool signature changes.
 - **0.4.0** — new `send_test_code(inbox_id)` tool (stdio and the hosted
   remote server, under the same per-key caps as the other non-wait tools):
   puts one sample OTP email into your own inbox without going through the
