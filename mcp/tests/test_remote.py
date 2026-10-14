@@ -11,9 +11,11 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import anyio
 import httpx2
@@ -942,10 +944,8 @@ def test_uvicorn_limit_concurrency_covers_both_pools(path):
     """uvicorn answers 503 above --limit-concurrency before our limiters ever
     see the request, so it must admit every wait + other slot (and the wait
     pool must stay below the backend's global 64 so MCP alone cannot fill it)."""
-    import re
-    from pathlib import Path
-
-    text = (Path(__file__).resolve().parents[3] / path).read_text()
+    target = Path(__file__).resolve().parents[3] / path  # absent in the sdks/-only mirror (H4)
+    text = target.read_text() if target.is_file() else pytest.skip(f"{path} not in this checkout")
     m = re.search(r'"--limit-concurrency",\s*"(\d+)"', text)
     assert m, path
     assert int(m.group(1)) >= srv.WAIT_CONCURRENCY + srv.OTHER_CONCURRENCY
